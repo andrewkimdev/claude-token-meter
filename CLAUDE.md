@@ -41,4 +41,8 @@ LilyGO T-Display(클래식 ESP32)에 현재 Mac에 로그인된 Claude 구독 �
   - `tools/preview.py`로 화면을 PNG로 미리 볼 수 있다. `render.cpp`를 바꾸면 `preview.py`도 함께 바꾼다.
 - **P4 완료 `[V]`**: 디바이스는 `ctmeter-8f70`이다. 브리지를 `--transport auto`로 띄우면 USB가 있으면 USB로, 없으면 WiFi(서명된 HTTP)로 보낸다.
   - `ctm setup`은 반드시 일반 터미널에서 실행한다(`!` 불가).
-- 다음: P5(견고성. Mac 슬립/웨이크, 공유기 재부팅, IP 변경, 장시간 운용), P6(LaunchAgent 설치, README).
+- **P5/P6 완료 `[V]`**:
+  - 펌웨어 0.3.0: 전원을 다시 켜면 마지막 값을 "restored"로 복원한다. WiFi 재접속 백오프, WDT가 들어갔다.
+  - 브리지는 LaunchAgent `com.ctm.bridge`로 돈다(`ctm install`). 점검은 `ctm doctor`로 한다.
+  - LaunchAgent로 돌아가므로 업로드할 때 브리지를 일시정지하는 방법은 같다: `kill -USR1 $(cat ~/.claude-token-meter/serial/hold.pid)` 두 번.
+- 남은 일과 미결 항목: `docs/TASKS.md`.

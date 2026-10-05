@@ -89,3 +89,12 @@ ARCHITECTURE.md의 P0 항목을 실측했다. 이 결과에 따라 ARCHITECTURE.
   - 브리지는 1초 안에 WiFi로 전환했다.
   - 디바이스가 재부팅하고 WiFi에 다시 붙는 동안 POST 2회가 시간 초과로 실패했고, 백오프(5초, 10초) 뒤 성공했다. 전원 교체에서 갱신 재개까지 약 16초였다.
 - launchd가 아닌 셸에서 띄운 브리지로도 LAN 송신 권한 문제는 없었다. LaunchAgent로 띄웠을 때 같은지는 P6에서 다시 확인한다.
+
+## P5/P6 실기 검증 (2026-10-05) `[V]`
+- **LaunchAgent:** `ctm install --statusline --replace`로 `com.ctm.bridge`를 설치했다. launchd에서 띄운 penv python도 WiFi POST에 성공했다. 로컬 네트워크 권한 프롬프트나 차단은 관측되지 않았다. `ctm doctor` 결과는 OK(8/8)였다.
+- **업로드와 NVS:** 펌웨어 0.3.0을 USB로 업로드했다. WiFi 설정(NVS)은 업로드 후에도 유지됐다. 첫 ack 직후 `last_state saved (new window)`가 찍혔다.
+- **전원 차단 후 복원:** USB를 뽑고 충전기로 옮겼다.
+  - 부팅 화면: 마지막 값과 회색 "restored", 시간은 "--" (사용자가 육안으로 확인)
+  - 수 초 뒤: "WiFi"로 바뀌고 카운트다운이 나타남
+  - 브리지 기록: USB 이탈 1초 안에 WiFi로 전환했다. 디바이스가 부팅하는 동안 POST 2회가 시간 초과로 실패했고, 17초 뒤 ack를 받았다.
+- **힙:** WiFi, mDNS, WebServer, sprite를 모두 올린 상태에서 free 164KB, min 159KB였다(추정치 170–190KB와 근접).
