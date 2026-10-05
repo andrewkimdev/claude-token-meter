@@ -17,6 +17,7 @@ Needs Pillow. The PlatformIO venv has it:
   ... --view detail --frame-age 200 --uptime 3600 --heap 150000 --toast "run ctm setup"
   ... (no frame argument) -> waiting screen
   ... --via wifi --provisioned --wifi connected --ip 192.168.1.23 --rssi -61
+  ... --restored   (P5: values from NVS, device clock unset -> "--" times)
 """
 from __future__ import annotations
 
@@ -38,7 +39,7 @@ ROOT = Path(__file__).resolve().parent.parent
 FONT_DIR = ROOT / "firmware/.pio/libdeps/t-display/TFT_eSPI/Fonts"
 OUT_DIR = ROOT / "tools/preview_out"
 
-FW_VERSION = "0.2.0"          # core/protocol.h
+FW_VERSION = "0.3.0"          # core/protocol.h
 TZ_OFFSET_S = 9 * 3600        # firmware: setenv("TZ","KST-9") == UTC+9
 
 # ---------------------------------------------------------------- fonts ----
@@ -227,6 +228,7 @@ class Sprite:
 
 FIVE_HOUR_S, SEVEN_DAY_S = 5 * 3600, 7 * 86400
 LINK_FRESH_S, LINK_OFFLINE_S = 150, 300
+MIN_VALID_EPOCH = 1600000000
 
 
 @dataclass
@@ -262,7 +264,7 @@ def lround(x):
 
 @dataclass
 class View:
-    state: str = "missing"   # missing | reset | live
+    state: str = "missing"   # missing | reset | live | noclock (P5 restored, clock unset)
     pct_int: int = 0
     pct: float = 0
     pace: float = 0
@@ -277,9 +279,17 @@ def level_for(pct, pace):
     return "neutral"
 
 
-def make_view(w: Window, now, wlen) -> View:
+def clock_usable(clock_set, now):
+    return clock_set and now >= MIN_VALID_EPOCH
+
+
+def make_view(w: Window, now, wlen, clock_ok=True) -> View:
     v = View()
     if not w.present:
+        return v
+    if not clock_ok:
+        v.state, v.pct, v.pct_int = "noclock", w.pct, lround(w.pct)
+        v.level = "red" if w.pct >= 95 else "orange" if w.pct >= 80 else "neutral"
         return v
     if w.resets_at <= now:
         v.state = "reset"
@@ -307,6 +317,12 @@ def fmt_age(s):
     return f"{s // 86400}d ago"
 
 
+def fmt_age_or_dash(clock_ok, now, obs):
+    if not clock_ok: return "--"
+    if obs <= 0: return "no data"
+    return fmt_age(now - obs)
+
+
 def latest_observed(f: Frame):
     return max([w.observed_at for w in (f.five_hour, f.seven_day) if w.present] or [0])
 
@@ -331,13 +347,18 @@ DET_Y0, DET_DY, DET_VX = 2, 16, 76
 @dataclass
 class Model:
     have_frame: bool = False
+    restored: bool = False          # P5: frame from NVS, no live frame since boot
     frame: Frame = field(default_factory=Frame)
     now: int = 0
+    clock_ok: bool = False          # P5: clockUsable(clockSet, now)
     view: str = "main"
     frame_age: int = 0
     last_seq: int = 0
     uptime: int = 0
     free_heap: int = 0
+    min_heap: int = 0               # P5
+    reconnects: int = 0             # P5
+    disc_reason: int = 0            # P5
     toast: str | None = None
     # P4
     via_wifi: bool = False          # transport of the last accepted frame
@@ -358,6 +379,11 @@ def bar_color(l):
 
 def draw_bar(s: Sprite, y, h, v: View):
     s.fill_rect(BAR_X, y, BAR_W, h, C_TRACK)
+    if v.state == "noclock":
+        fw = int(BAR_W * v.pct / 100.0 + 0.5)
+        if fw > 0:
+            s.fill_rect(BAR_X, y, fw, h, C_DIM)
+        return
     if v.state != "live":
         return
     fw = int(BAR_W * v.pct / 100.0 + 0.5)
@@ -375,6 +401,9 @@ def draw_countdown(s: Sprite, y, v: View):
     elif v.state == "reset":
         s.color = C_DIM
         s.draw_string("reset", RIGHT, y, 4)
+    elif v.state == "noclock":
+        s.color = C_DIM
+        s.draw_string("--", RIGHT, y, 4)
     s.datum = TL
 
 
@@ -386,6 +415,8 @@ def draw_five_hour(s: Sprite, v: View):
     col = C_DIM
     if v.state == "live":
         col, num = level_color(v.level), str(v.pct_int)
+    elif v.state == "noclock":
+        num = str(v.pct_int)
     else:
         num = "0" if v.state == "reset" else "--"
     s.color = col
@@ -399,6 +430,8 @@ def draw_seven_day(s: Sprite, v: View):
     col = C_DIM
     if v.state == "live":
         col, num = level_color(v.level), f"{v.pct_int}%"
+    elif v.state == "noclock":
+        num = f"{v.pct_int}%"
     else:
         num = "0%" if v.state == "reset" else "--"
     s.color = col
@@ -412,7 +445,9 @@ def draw_seven_day(s: Sprite, v: View):
 def draw_footer(s: Sprite, m: Model):
     link = link_state(m.frame_age)
     dot, txt, label = C_GREEN, C_TEXT, "WiFi" if m.via_wifi else "USB"
-    if link == "stale":
+    if m.restored:
+        dot, txt, label = C_DIM, C_DIM, "restored"
+    elif link == "stale":
         dot = txt = C_DIM
     elif link == "offline":
         dot, txt, label = C_RED, C_RED, "host offline"
@@ -421,7 +456,7 @@ def draw_footer(s: Sprite, m: Model):
     s.draw_string(label, PAD + 12, Y_FOOT, 2)
     obs = latest_observed(m.frame)
     s.datum, s.color = TR, C_DIM
-    s.draw_string(fmt_age(m.now - obs) if obs > 0 else "no data", RIGHT, Y_FOOT, 2)
+    s.draw_string(fmt_age_or_dash(m.clock_ok, m.now, obs), RIGHT, Y_FOOT, 2)
     s.datum = TL
 
 
@@ -433,23 +468,27 @@ def detail_row(s: Sprite, row, label, value, col):
     s.draw_string(value, DET_VX, y, 2)
 
 
-def reset_row(s: Sprite, row, label, w: Window, now):
+def reset_row(s: Sprite, row, label, w: Window, now, clock_ok):
     if not w.present:
         return detail_row(s, row, label, "--", C_DIM)
     lt = time.gmtime(w.resets_at + TZ_OFFSET_S)   # == localtime_r with TZ=KST-9
-    if w.resets_at > now:
+    if not clock_ok:
+        detail_row(s, row, label, time.strftime("%a %m-%d %H:%M", lt), C_DIM)
+    elif w.resets_at > now:
         detail_row(s, row, label, time.strftime("%a %m-%d %H:%M", lt), C_TEXT)
     else:
         detail_row(s, row, label, time.strftime("passed %a %H:%M", lt), C_DIM)
 
 
 def draw_detail(s: Sprite, m: Model):
-    reset_row(s, 0, "5H reset", m.frame.five_hour, m.now)
-    reset_row(s, 1, "7D reset", m.frame.seven_day, m.now)
+    reset_row(s, 0, "5H reset", m.frame.five_hour, m.now, m.clock_ok)
+    reset_row(s, 1, "7D reset", m.frame.seven_day, m.now, m.clock_ok)
     via = "WiFi" if m.via_wifi else "USB"
     link = link_state(m.frame_age)
     lc = {"fresh": C_GREEN, "stale": C_DIM}.get(link, C_RED)
-    if m.have_frame:
+    if m.restored:
+        detail_row(s, 2, "link", "restored, no live frame", C_DIM)
+    elif m.have_frame:
         detail_row(s, 2, "link", f"{via}, frame {fmt_age(m.frame_age)}", lc)
     else:
         detail_row(s, 2, "link", "no frame yet", C_DIM)
@@ -461,12 +500,16 @@ def draw_detail(s: Sprite, m: Model):
         detail_row(s, 3, "wifi", "off" if m.provisioned else "off (run ctm setup)", C_DIM)
     detail_row(s, 4, "ip", m.ip or "--", C_TEXT if m.ip else C_DIM)
     detail_row(s, 5, "host", f"{m.host}.local", C_TEXT if m.provisioned else C_DIM)
-    detail_row(s, 6, "up / heap", f"{fmt_countdown(m.uptime)} / {m.free_heap} B", C_TEXT)
+    detail_row(s, 6, "up / heap",
+               f"{fmt_countdown(m.uptime)} / {m.free_heap // 1024}k min {m.min_heap // 1024}k",
+               C_AMBER if m.min_heap < 40 * 1024 else C_TEXT)
     y = DET_Y0 + 7 * DET_DY
     s.color = C_DIM
     s.draw_string(f"fw {FW_VERSION}  KST", PAD, y, 2)
+    rj = f"rejoin {m.reconnects}" + (f"  r{m.disc_reason}" if m.disc_reason else "")
     s.datum = TR
-    s.draw_string("BTN1: back", RIGHT, y, 2)
+    s.color = C_AMBER if m.reconnects else C_DIM
+    s.draw_string(rj, RIGHT, y, 2)
     s.datum = TL
 
 
@@ -509,8 +552,8 @@ def render(m: Model) -> Image.Image:
     elif not m.have_frame:
         draw_waiting(s, m)
     else:
-        draw_five_hour(s, make_view(m.frame.five_hour, m.now, FIVE_HOUR_S))
-        draw_seven_day(s, make_view(m.frame.seven_day, m.now, SEVEN_DAY_S))
+        draw_five_hour(s, make_view(m.frame.five_hour, m.now, FIVE_HOUR_S, m.clock_ok))
+        draw_seven_day(s, make_view(m.frame.seven_day, m.now, SEVEN_DAY_S, m.clock_ok))
         draw_footer(s, m)
     if m.toast:
         draw_toast(s, m.toast)
@@ -541,12 +584,12 @@ def win(pct, resets_in, now, observed_ago=0):
 def samples(scale: int):
     now = 1791180000
     h, d = 3600, 86400
-    std = dict(uptime=2 * d + 5 * h + 17 * 60, free_heap=154_320)
+    std = dict(uptime=2 * d + 5 * h + 17 * 60, free_heap=154_320, min_heap=121_400)
     wifi_ok = dict(provisioned=True, wifi="connected", ip="192.168.1.23", rssi=-61)
 
     def mdl(fd, **kw):
         f = parse_frame(fd)
-        base = dict(have_frame=True, frame=f, now=now, last_seq=f.seq, frame_age=12, **std)
+        base = dict(have_frame=True, frame=f, now=now, clock_ok=True, last_seq=f.seq, frame_age=12, **std)
         base.update(kw)
         return Model(**base)
 
@@ -569,7 +612,18 @@ def samples(scale: int):
         "wifi_stale":    mdl(frame_dict(now, 53, win(30, 3 * h, now, 25 * 60), win(20, 4 * d, now, 25 * 60)),
                              frame_age=200, via_wifi=True, **wifi_ok),
         "detail":        mdl(frame_dict(now, 49, win(62, 3 * h, now, 40), win(55, 4 * d, now, 40)),
-                             view="detail", frame_age=34, via_wifi=True, **wifi_ok),
+                             view="detail", frame_age=34, via_wifi=True, reconnects=2, disc_reason=200,
+                             **wifi_ok),
+        # P5: booted from NVS last_state; clock unset (boot epoch ~ uptime) -> "--" times.
+        "restored":      mdl(frame_dict(now, 55, win(84, 2 * h, now, 40), win(45, 4 * d, now, 40)),
+                             restored=True, clock_ok=False, now=12, uptime=12, frame_age=0,
+                             provisioned=True, wifi="connecting"),
+        "detail_restored": mdl(frame_dict(now, 56, win(84, 2 * h, now, 40), win(45, 4 * d, now, 40)),
+                               view="detail", restored=True, clock_ok=False, now=12, uptime=12,
+                               frame_age=0, **wifi_ok),
+        "detail_low_heap": mdl(frame_dict(now, 57, win(30, 3 * h, now, 40), win(20, 4 * d, now, 40)),
+                               view="detail", frame_age=5, via_wifi=True, free_heap=52_000,
+                               min_heap=36_100, **wifi_ok),
         "detail_unprovisioned": mdl(frame_dict(now, 54, win(62, 3 * h, now, 40), win(55, 4 * d, now, 40)),
                                     view="detail", frame_age=12),
         "detail_5h_passed": mdl(frame_dict(now, 50, win(71, -10 * 60, now, 2 * h), win(33, 4 * d, now, 2 * h)),
@@ -596,6 +650,11 @@ def main():
     ap.add_argument("--host", default="ctmeter-a1b2")
     ap.add_argument("--ip", default="")
     ap.add_argument("--rssi", type=int, default=0)
+    ap.add_argument("--restored", action="store_true",
+                    help="P5: frame restored from NVS, device clock unset (footer 'restored', '--' times)")
+    ap.add_argument("--min-heap", type=int, default=120000)
+    ap.add_argument("--reconnects", type=int, default=0)
+    ap.add_argument("--disc-reason", type=int, default=0)
     ap.add_argument("--scale", type=int, default=3, help="nearest-neighbour upscale (1 = native)")
     ap.add_argument("-o", "--out", type=Path, default=OUT_DIR / "preview.png")
     ap.add_argument("--samples", action="store_true", help=f"write sample set to {OUT_DIR}")
@@ -605,6 +664,7 @@ def main():
     if a.samples:
         return samples(a.scale)
     m = Model(view=a.view, frame_age=a.frame_age, uptime=a.uptime, free_heap=a.heap, toast=a.toast,
+              min_heap=a.min_heap, reconnects=a.reconnects, disc_reason=a.disc_reason,
               via_wifi=a.via == "wifi", provisioned=a.provisioned, wifi=a.wifi, host=a.host,
               ip=a.ip if a.wifi == "connected" else "", rssi=a.rssi if a.wifi == "connected" else 0)
     if a.frame:
@@ -614,6 +674,10 @@ def main():
         f = parse_frame(d)
         m.have_frame, m.frame, m.last_seq = True, f, f.seq
         m.now = a.now if a.now is not None else f.sent_at
+        m.restored = a.restored
+        m.clock_ok = clock_usable(not a.restored, m.now)
+        if a.restored and a.now is None:
+            m.now = a.uptime   # unset clock: epoch ~ uptime
     else:
         m.now = a.now if a.now is not None else int(time.time())
     save(render(m), a.out, a.scale)

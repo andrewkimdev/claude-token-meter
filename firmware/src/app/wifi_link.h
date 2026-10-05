@@ -22,8 +22,8 @@ void wifiLinkInit(HttpStateHook onState, HttpInfoHook onInfo);
 
 const char *wifiHost();   // "ctmeter-xxxx" (valid after wifiLinkInit)
 
-// (Re)start STA with these credentials; starts the HTTP server and, on the
-// first IP, mDNS. Resets the disconnect reason. Copies ssid/pass.
+// (Re)start STA with these credentials; starts the HTTP server; mDNS follows
+// each IP. Resets the disconnect reason. Copies ssid/pass.
 void wifiStart(const char *ssid, const char *pass);
 
 // Stop HTTP + mDNS, disconnect, erase the IDF copy of the AP config, radio off.
@@ -32,12 +32,16 @@ void wifiStop();
 WifiState wifiState();
 int       wifiRssi();                     // 0 unless connected
 void      wifiIp(char *buf, size_t n);    // "" unless connected
-uint8_t   wifiLastReason();               // last STA_DISCONNECTED reason since wifiStart (0 = none)
+uint8_t   wifiLastReason();               // last STA_DISCONNECTED reason since wifiStart (0 = none;
+                                          // our own ASSOC_LEAVE is not recorded)
+uint32_t  wifiReconnects();               // successful re-joins since boot (first join not counted)
 
 // "no_ap" | "auth" | "timeout" for a provision failure (PROTOCOL §4.3).
 const char *wifiProvisionErr(uint8_t reason);
 
-// Serve HTTP, start mDNS on first IP, retry joins, log transitions. Call every loop().
+// Serve HTTP, (re)start mDNS on every (re)connect / IP change, rejoin with
+// backoff 5,10,20,40,60,60.. s (no ESP.restart), log transitions. Call every loop().
+// POST /v1/state: Content-Length > 1024 -> 413 before the body is read.
 void wifiPoll();
 
 // Blocking scan (~2-4 s). Temporarily enables STA if WiFi is off. Returns

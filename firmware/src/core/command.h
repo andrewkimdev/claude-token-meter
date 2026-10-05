@@ -55,7 +55,15 @@ struct InfoFields {
   uint32_t    lastSeq = 0;
   bool        provisioned = false;
   const char *wifi = nullptr;
+  // P5 health (always emitted)
+  uint32_t    reconnects = 0;     // successful WiFi re-joins since boot
+  uint8_t     discReason = 0;     // last STA disconnect reason (0 = none)
+  uint32_t    heapFree = 0;
+  uint32_t    heapMin = 0;        // ESP.getMinFreeHeap(): low-water mark since boot
+  const char *reset = "";         // boot reset reason ("poweron", "task_wdt", ...)
+  bool        restored = false;   // showing NVS-restored values, no live frame yet
 };
+constexpr size_t INFO_BUF = 384;
 int formatInfo(const InfoFields &f, const char *fw, char *buf, size_t n);
 
 }  // namespace ctm

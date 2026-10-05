@@ -47,6 +47,11 @@ uint16_t barColor(Level l) { return l == Level::Neutral ? C_NEUTRAL : levelColor
 
 void drawBar(int y, int h, const WindowView &v) {
   spr.fillRect(BAR_X, y, BAR_W, h, C_TRACK);
+  if (v.state == WinState::NoClock) {   // restored: fill only, grey, no pace tick
+    int fw = static_cast<int>(BAR_W * v.pct / 100.0f + 0.5f);
+    if (fw > 0) spr.fillRect(BAR_X, y, fw, h, C_DIM);
+    return;
+  }
   if (v.state != WinState::Live) return;
   int fw = static_cast<int>(BAR_W * v.pct / 100.0f + 0.5f);
   if (fw > 0) spr.fillRect(BAR_X, y, fw, h, barColor(v.level));
@@ -65,6 +70,9 @@ void drawCountdown(int y, const WindowView &v) {
   } else if (v.state == WinState::Reset) {
     spr.setTextColor(C_DIM);
     spr.drawString("reset", RIGHT, y, 4);
+  } else if (v.state == WinState::NoClock) {   // clock unset: unknown, not guessed
+    spr.setTextColor(C_DIM);
+    spr.drawString("--", RIGHT, y, 4);
   }
   spr.setTextDatum(TL_DATUM);
 }
@@ -83,6 +91,8 @@ void drawFiveHour(const WindowView &v) {
   if (v.state == WinState::Live) {
     col = levelColor(v.level);
     snprintf(num, sizeof num, "%d", v.pctInt);
+  } else if (v.state == WinState::NoClock) {
+    snprintf(num, sizeof num, "%d", v.pctInt);   // restored: grey (stale looks stale)
   } else if (v.state == WinState::Reset) {
     snprintf(num, sizeof num, "0");
   } else {
@@ -102,6 +112,8 @@ void drawSevenDay(const WindowView &v) {
   if (v.state == WinState::Live) {
     col = levelColor(v.level);
     snprintf(num, sizeof num, "%d%%", v.pctInt);
+  } else if (v.state == WinState::NoClock) {
+    snprintf(num, sizeof num, "%d%%", v.pctInt);
   } else if (v.state == WinState::Reset) {
     snprintf(num, sizeof num, "0%%");
   } else {
@@ -120,7 +132,9 @@ void drawFooter(const RenderModel &m) {
   // Label: transport that delivered the last accepted frame (P4).
   uint16_t dot = C_GREEN, txt = C_TEXT;
   const char *label = m.viaWifi ? "WiFi" : "USB";
-  if (m.link == LinkState::Stale) {
+  if (m.restored) {   // P5: values from NVS, nothing live since boot
+    dot = C_DIM; txt = C_DIM; label = "restored";
+  } else if (m.link == LinkState::Stale) {
     dot = C_DIM; txt = C_DIM;
   } else if (m.link == LinkState::Offline) {
     dot = C_RED; txt = C_RED; label = "host offline";
@@ -133,8 +147,7 @@ void drawFooter(const RenderModel &m) {
   char buf[16];
   spr.setTextDatum(TR_DATUM);
   spr.setTextColor(C_DIM);
-  spr.drawString(obs > 0 ? formatAge(m.now - obs, buf, sizeof buf) : "no data",
-                 RIGHT, Y_FOOT, 2);
+  spr.drawString(formatAgeOrDash(m.clockOk, m.now, obs, buf, sizeof buf), RIGHT, Y_FOOT, 2);
   spr.setTextDatum(TL_DATUM);
 }
 
@@ -149,8 +162,9 @@ void detailRow(int row, const char *label, const char *value, uint16_t col) {
   spr.drawString(value, DET_VX, y, 2);
 }
 
-// Absolute reset time in local time (TZ env, KST-9 -- gotcha 3.3).
-void resetRow(int row, const char *label, const Window &w, int64_t now) {
+// Absolute reset time in local time (TZ env, KST-9 -- gotcha 3.3). resets_at
+// is absolute, so it is printable without a clock; only "passed?" needs one.
+void resetRow(int row, const char *label, const Window &w, int64_t now, bool clockOk) {
   char buf[32];
   if (!w.present) {
     detailRow(row, label, "--", C_DIM);
@@ -159,7 +173,10 @@ void resetRow(int row, const char *label, const Window &w, int64_t now) {
   time_t t = static_cast<time_t>(w.resets_at);
   struct tm lt;
   localtime_r(&t, &lt);
-  if (w.resets_at > now) {
+  if (!clockOk) {
+    strftime(buf, sizeof buf, "%a %m-%d %H:%M", &lt);
+    detailRow(row, label, buf, C_DIM);
+  } else if (w.resets_at > now) {
     strftime(buf, sizeof buf, "%a %m-%d %H:%M", &lt);
     detailRow(row, label, buf, C_TEXT);
   } else {
@@ -172,13 +189,15 @@ void resetRow(int row, const char *label, const Window &w, int64_t now) {
 // is on the main footer and last_seq is in USB/HTTP info.
 void drawDetail(const RenderModel &m) {
   char buf[40], a[16];
-  resetRow(0, "5H reset", m.frame.five_hour, m.now);
-  resetRow(1, "7D reset", m.frame.seven_day, m.now);
+  resetRow(0, "5H reset", m.frame.five_hour, m.now, m.clockOk);
+  resetRow(1, "7D reset", m.frame.seven_day, m.now, m.clockOk);
 
   const char *via = m.viaWifi ? "WiFi" : "USB";
   uint16_t lc = m.link == LinkState::Fresh ? C_GREEN
               : m.link == LinkState::Stale ? C_DIM : C_RED;
-  if (m.haveFrame) {
+  if (m.restored) {
+    detailRow(2, "link", "restored, no live frame", C_DIM);
+  } else if (m.haveFrame) {
     snprintf(buf, sizeof buf, "%s, frame %s", via, formatAge(m.frameAgeS, a, sizeof a));
     detailRow(2, "link", buf, lc);
   } else {
@@ -199,16 +218,25 @@ void drawDetail(const RenderModel &m) {
   snprintf(buf, sizeof buf, "%s.local", m.host);
   detailRow(5, "host", buf, m.provisioned ? C_TEXT : C_DIM);
 
-  snprintf(buf, sizeof buf, "%s / %lu B", formatCountdown(m.uptimeS, a, sizeof a),
-           (unsigned long)m.freeHeap);
-  detailRow(6, "up / heap", buf, C_TEXT);
+  // P5 health: free / low-water heap in KiB; amber under the 40 KB warn line.
+  snprintf(buf, sizeof buf, "%s / %luk min %luk", formatCountdown(m.uptimeS, a, sizeof a),
+           (unsigned long)(m.freeHeap / 1024u), (unsigned long)(m.minHeap / 1024u));
+  detailRow(6, "up / heap", buf, m.minHeap < 40u * 1024u ? C_AMBER : C_TEXT);
 
+  // Bottom line: fw left; WiFi re-joins + last disconnect reason right (P5).
   snprintf(buf, sizeof buf, "fw %s  KST", FW_VERSION);
   int y = DET_Y0 + 7 * DET_DY;
   spr.setTextColor(C_DIM);
   spr.drawString(buf, PAD, y, 2);
+  if (m.discReason) {
+    snprintf(buf, sizeof buf, "rejoin %lu  r%u", (unsigned long)m.reconnects,
+             (unsigned)m.discReason);
+  } else {
+    snprintf(buf, sizeof buf, "rejoin %lu", (unsigned long)m.reconnects);
+  }
   spr.setTextDatum(TR_DATUM);
-  spr.drawString("BTN1: back", RIGHT, y, 2);
+  spr.setTextColor(m.reconnects ? C_AMBER : C_DIM);
+  spr.drawString(buf, RIGHT, y, 2);
   spr.setTextDatum(TL_DATUM);
 }
 
@@ -263,8 +291,8 @@ void render(const RenderModel &m) {
   } else if (!m.haveFrame) {
     drawWaiting(m);
   } else {
-    drawFiveHour(makeView(m.frame.five_hour, m.now, FIVE_HOUR_S));
-    drawSevenDay(makeView(m.frame.seven_day, m.now, SEVEN_DAY_S));
+    drawFiveHour(makeView(m.frame.five_hour, m.now, FIVE_HOUR_S, m.clockOk));
+    drawSevenDay(makeView(m.frame.seven_day, m.now, SEVEN_DAY_S, m.clockOk));
     drawFooter(m);
   }
   if (m.toast) drawToast(m.toast);

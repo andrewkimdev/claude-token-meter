@@ -13,10 +13,12 @@
 #include <string>
 #include <vector>
 
+#include "core/backoff.h"
 #include "core/command.h"
 #include "core/hmac.h"
 #include "core/http_accept.h"
 #include "core/meter.h"
+#include "core/persist.h"
 #include "core/protocol.h"
 
 #ifndef FIXTURES_DIR
@@ -617,18 +619,261 @@ static void test_hostname_and_info() {
   f.uptimeS = 123;
   f.lastSeq = 1791180017;
   f.provisioned = true;
-  char buf[256];
-  formatInfo(f, "0.2.0", buf, sizeof buf);
+  f.reconnects = 3;
+  f.discReason = 200;
+  f.heapFree = 150000;
+  f.heapMin = 98000;
+  f.reset = "poweron";
+  f.restored = true;
+  char buf[INFO_BUF];
+  formatInfo(f, "0.3.0", buf, sizeof buf);
   TEST_ASSERT_EQUAL_STRING(
-      "{\"t\":\"info\",\"fw\":\"0.2.0\",\"host\":\"ctmeter-a1b2\",\"ip\":\"192.168.1.23\","
-      "\"rssi\":-55,\"uptime_s\":123,\"last_seq\":1791180017,\"provisioned\":true}",
+      "{\"t\":\"info\",\"fw\":\"0.3.0\",\"host\":\"ctmeter-a1b2\",\"ip\":\"192.168.1.23\","
+      "\"rssi\":-55,\"uptime_s\":123,\"last_seq\":1791180017,\"provisioned\":true,"
+      "\"reconnects\":3,\"disc_reason\":200,\"heap_free\":150000,\"heap_min\":98000,"
+      "\"reset\":\"poweron\",\"restored\":true}",
       buf);
   f.wifi = "connected";
-  formatInfo(f, "0.2.0", buf, sizeof buf);
+  formatInfo(f, "0.3.0", buf, sizeof buf);
   JsonDocument d;
   TEST_ASSERT_TRUE(!deserializeJson(d, buf));
   TEST_ASSERT_EQUAL_STRING("connected", d["wifi"].as<const char *>());
   TEST_ASSERT_TRUE(d["provisioned"].as<bool>());
+  // worst case still fits INFO_BUF
+  f.ip = "192.168.219.106";
+  f.host = "ctmeter-8f70";
+  f.reset = "deepsleep";
+  f.wifi = "connecting";
+  f.rssi = -100;
+  f.lastSeq = 4294967295u;
+  f.uptimeS = 4294967;
+  f.reconnects = 4294967295u;
+  f.heapFree = f.heapMin = 4294967295u;
+  int k = formatInfo(f, "0.3.0", buf, sizeof buf);
+  TEST_ASSERT_TRUE(k > 0 && static_cast<size_t>(k) < sizeof buf);
+  TEST_ASSERT_TRUE(!deserializeJson(d, buf));
+}
+
+// ---------------------------------------------------------------- P5 persist
+
+static StateFrame sampleFrame() {
+  StateFrame f;
+  f.seq = 1791180017u;
+  f.sent_at = 1791180000;
+  f.five_hour = {true, 52.5f, 1791186600, 1791179913};
+  f.seven_day = {true, 33.33f, 1791511200, 1791179900};
+  return f;
+}
+
+static void assertSameFrame(const StateFrame &a, const StateFrame &b) {
+  TEST_ASSERT_EQUAL_UINT32(a.seq, b.seq);
+  TEST_ASSERT_TRUE(a.sent_at == b.sent_at);
+  const Window *wa[2] = {&a.five_hour, &a.seven_day}, *wb[2] = {&b.five_hour, &b.seven_day};
+  for (int i = 0; i < 2; i++) {
+    TEST_ASSERT_EQUAL(wa[i]->present, wb[i]->present);
+    if (!wa[i]->present) continue;
+    TEST_ASSERT_FLOAT_WITHIN(0.005f, wa[i]->pct, wb[i]->pct);   // quantised to 0.01
+    TEST_ASSERT_TRUE(wa[i]->resets_at == wb[i]->resets_at);
+    TEST_ASSERT_TRUE(wa[i]->observed_at == wb[i]->observed_at);
+  }
+}
+
+static void test_blob_roundtrip() {
+  uint8_t b[STATE_BLOB_LEN];
+  StateFrame f = sampleFrame(), g;
+  encodeStateBlob(f, b);
+  TEST_ASSERT_TRUE(b[0] == 'C' && b[1] == 'T' && b[2] == 'L' && b[3] == STATE_BLOB_VER);
+  TEST_ASSERT_EQUAL_UINT8(3, b[4]);
+  TEST_ASSERT_EQUAL_UINT8(0xF1, b[5]);   // 1791180017 = 0x6AC33CF1, little-endian
+  TEST_ASSERT_EQUAL_UINT8(0x6A, b[8]);
+  TEST_ASSERT_TRUE(decodeStateBlob(b, sizeof b, g));
+  assertSameFrame(f, g);
+
+  // one window missing; extremes
+  f.five_hour = Window{};
+  f.seven_day.pct = 100.0f;
+  f.seq = 0xFFFFFFFFu;
+  f.sent_at = 0;
+  encodeStateBlob(f, b);
+  TEST_ASSERT_EQUAL_UINT8(2, b[4]);
+  TEST_ASSERT_TRUE(decodeStateBlob(b, sizeof b, g));
+  assertSameFrame(f, g);
+  TEST_ASSERT_FALSE(g.five_hour.present);
+
+  // nothing present
+  f.seven_day = Window{};
+  encodeStateBlob(f, b);
+  TEST_ASSERT_TRUE(decodeStateBlob(b, sizeof b, g));
+  TEST_ASSERT_FALSE(g.five_hour.present || g.seven_day.present);
+}
+
+// Re-seal a hand-edited blob so the CRC passes and the field check is what fails.
+static void reseal(uint8_t *b) {
+  uint32_t c = crc32(b, 53);
+  for (int i = 0; i < 4; i++) b[53 + i] = static_cast<uint8_t>(c >> (8 * i));
+}
+
+static void test_blob_rejects() {
+  uint8_t b[STATE_BLOB_LEN], x[STATE_BLOB_LEN];
+  StateFrame f = sampleFrame(), g = sampleFrame();
+  g.seq = 77;   // sentinel: must stay untouched on failure
+  encodeStateBlob(f, b);
+  TEST_ASSERT_FALSE(decodeStateBlob(b, sizeof b - 1, g));
+  TEST_ASSERT_FALSE(decodeStateBlob(nullptr, sizeof b, g));
+  for (size_t i = 0; i < sizeof b; i++) {   // any single bit flip is caught
+    std::memcpy(x, b, sizeof b);
+    x[i] ^= 0x04;
+    TEST_ASSERT_FALSE_MESSAGE(decodeStateBlob(x, sizeof x, g), "bit flip");
+  }
+  std::memcpy(x, b, sizeof b); x[3] = 2; reseal(x);                    // version
+  TEST_ASSERT_FALSE(decodeStateBlob(x, sizeof x, g));
+  std::memcpy(x, b, sizeof b); x[4] = 7; reseal(x);                    // unknown flag
+  TEST_ASSERT_FALSE(decodeStateBlob(x, sizeof x, g));
+  std::memcpy(x, b, sizeof b); std::memset(x + 5, 0, 4); reseal(x);    // seq 0
+  TEST_ASSERT_FALSE(decodeStateBlob(x, sizeof x, g));
+  std::memcpy(x, b, sizeof b); x[17] = 0x11; x[18] = 0x27; reseal(x);  // pct 100.01
+  TEST_ASSERT_FALSE(decodeStateBlob(x, sizeof x, g));
+  std::memcpy(x, b, sizeof b); x[16] = 0x80; reseal(x);                // negative sent_at
+  TEST_ASSERT_FALSE(decodeStateBlob(x, sizeof x, g));
+  std::memset(x, 0xFF, sizeof x);                                      // erased flash
+  TEST_ASSERT_FALSE(decodeStateBlob(x, sizeof x, g));
+  TEST_ASSERT_EQUAL_UINT32(77, g.seq);
+}
+
+static void test_persist_throttle() {
+  const uint32_t T0 = 1000, MIN = PERSIST_MIN_INTERVAL_MS, URG = PERSIST_URGENT_MIN_MS;
+  PersistThrottle t;
+  TEST_ASSERT_FALSE(t.due(T0));                 // nothing pending
+  StateFrame a = sampleFrame();
+  t.offer(a);
+  TEST_ASSERT_TRUE(t.due(T0));                  // first write after boot: immediate
+  t.written(T0);
+  TEST_ASSERT_FALSE(t.pending());
+
+  StateFrame b = a;                             // pct-only change: throttled
+  b.five_hour.pct = 60;
+  b.seq++;
+  t.offer(b);
+  TEST_ASSERT_FALSE(t.urgent());
+  TEST_ASSERT_FALSE(t.due(T0 + URG));
+  TEST_ASSERT_FALSE(t.due(T0 + MIN - 1));
+  StateFrame c = b;                             // newer pending replaces it
+  c.five_hour.pct = 61;
+  c.seq++;
+  t.offer(c);
+  TEST_ASSERT_TRUE(t.due(T0 + MIN));
+  TEST_ASSERT_EQUAL_UINT32(c.seq, t.pendingFrame().seq);
+  const uint32_t T1 = T0 + MIN;
+  t.written(T1);
+
+  StateFrame d = c;                             // new 5h window: prompt (30 s floor)
+  d.five_hour.resets_at += FIVE_HOUR_S;
+  d.five_hour.pct = 1;
+  d.seq++;
+  t.offer(d);
+  TEST_ASSERT_TRUE(t.urgent());
+  TEST_ASSERT_FALSE(t.due(T1 + URG - 1));
+  StateFrame e = d;                             // pct-only after it: urgency is sticky
+  e.five_hour.pct = 2;
+  e.seq++;
+  t.offer(e);
+  TEST_ASSERT_TRUE(t.urgent());
+  TEST_ASSERT_TRUE(t.due(T1 + URG));
+  t.failed(T1 + URG);                           // NVS refused: keep, retry on 5 min
+  TEST_ASSERT_TRUE(t.pending());
+  TEST_ASSERT_FALSE(t.due(T1 + URG + MIN - 1));
+  TEST_ASSERT_TRUE(t.due(T1 + URG + MIN));
+  t.written(T1 + URG + MIN);
+
+  // millis() wrap
+  PersistThrottle w;
+  w.offer(a);
+  w.written(0xFFFFFF00u);
+  w.offer(b);
+  TEST_ASSERT_FALSE(w.due(0x00000100u));
+  TEST_ASSERT_TRUE(w.due(0xFFFFFF00u + MIN));
+
+  // seeded from NVS: same windows -> not urgent; a window appearing -> urgent
+  PersistThrottle s;
+  StateFrame stored = a;
+  stored.seven_day = Window{};
+  s.seed(stored);
+  s.offer(stored);
+  TEST_ASSERT_FALSE(s.urgent());
+  TEST_ASSERT_TRUE(s.due(T0));                  // still: first write after boot
+  s.written(T0);
+  s.offer(a);                                   // seven_day appears
+  TEST_ASSERT_TRUE(s.urgent());
+  TEST_ASSERT_TRUE(isNewWindow(stored, a));
+  TEST_ASSERT_FALSE(isNewWindow(a, stored));    // a window vanishing is not "new"
+}
+
+static void test_clock_guards() {
+  TEST_ASSERT_FALSE(clockUsable(false, 1791180000));
+  TEST_ASSERT_FALSE(clockUsable(true, 37));            // boot epoch ~ uptime
+  TEST_ASSERT_FALSE(clockUsable(true, MIN_VALID_EPOCH - 1));
+  TEST_ASSERT_TRUE(clockUsable(true, 1791180000));
+
+  Window w{true, 84.4f, 1791186600, 1791179913};
+  WindowView v = makeView(w, 37, FIVE_HOUR_S, false);  // unset clock: no time math
+  TEST_ASSERT_TRUE(v.state == WinState::NoClock);
+  TEST_ASSERT_EQUAL_INT(84, v.pctInt);
+  TEST_ASSERT_TRUE(v.remaining == 0);
+  TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.0f, v.pace);
+  TEST_ASSERT_TRUE(v.level == Level::Orange);
+  w.pct = 50;
+  TEST_ASSERT_TRUE(makeView(w, 37, FIVE_HOUR_S, false).level == Level::Neutral);  // no pace, no amber
+  w.pct = 96;
+  TEST_ASSERT_TRUE(makeView(w, 37, FIVE_HOUR_S, false).level == Level::Red);
+  TEST_ASSERT_TRUE(makeView(Window{}, 37, FIVE_HOUR_S, false).state == WinState::Missing);
+  // an expired restored window is NOT judged "reset" without a clock
+  w.resets_at = 10;
+  TEST_ASSERT_TRUE(makeView(w, 37, FIVE_HOUR_S, false).state == WinState::NoClock);
+
+  char buf[16];
+  TEST_ASSERT_EQUAL_STRING("--", formatAgeOrDash(false, 37, 1791179913, buf, sizeof buf));
+  TEST_ASSERT_EQUAL_STRING("no data", formatAgeOrDash(true, 1791180000, 0, buf, sizeof buf));
+  TEST_ASSERT_EQUAL_STRING("1m ago", formatAgeOrDash(true, 1791180000, 1791179913, buf, sizeof buf));
+}
+
+static void test_backoff_schedule() {
+  Backoff b;
+  const uint32_t want[] = {5000, 10000, 20000, 40000, 60000, 60000, 60000};
+  for (uint32_t w : want) TEST_ASSERT_EQUAL_UINT32(w, b.next());
+  TEST_ASSERT_EQUAL_UINT32(7, b.attempts());
+  b.reset();
+  TEST_ASSERT_EQUAL_UINT32(0, b.attempts());
+  TEST_ASSERT_EQUAL_UINT32(5000, b.next());
+  for (int i = 0; i < 1000; i++) TEST_ASSERT_TRUE(b.next() <= REJOIN_CAP_MS);   // never overflows
+}
+
+// Gate seeded from a restored last_seq (P5, PROTOCOL §3): exactly the
+// fixtures' "last_seq: N" case, i.e. no longer "anything goes" after a reboot.
+static void test_seq_gate_seeded_after_restore() {
+  uint8_t b[STATE_BLOB_LEN];
+  StateFrame f = sampleFrame(), r;
+  encodeStateBlob(f, b);
+  TEST_ASSERT_TRUE(decodeStateBlob(b, sizeof b, r));
+  SeqGate g;
+  g.commit(r.seq);
+  TEST_ASSERT_FALSE(g.wouldAccept(f.seq));        // replay of the persisted frame
+  TEST_ASSERT_FALSE(g.wouldAccept(f.seq - 100));  // older capture
+  TEST_ASSERT_TRUE(g.wouldAccept(f.seq + 1));     // epoch-based host seq keeps working
+  TEST_ASSERT_TRUE(g.wouldAccept(1));             // P1 seq==1 exception unchanged
+
+  // Over HTTP with the clock still unset (restored, no live frame yet).
+  uint8_t key[PAIR_KEY_LEN] = {1};
+  char body[128];
+  std::snprintf(body, sizeof body, "{\"t\":\"state\",\"v\":1,\"seq\":%lu,\"sent_at\":1791180000}",
+                static_cast<unsigned long>(f.seq));
+  uint8_t mac[SHA256_LEN];
+  hmacSha256(key, sizeof key, reinterpret_cast<const uint8_t *>(body), std::strlen(body), mac);
+  char sig[2 * SHA256_LEN + 1];
+  toHex(mac, sizeof mac, sig);
+  HttpVerdict v = acceptHttpState(key, body, std::strlen(body), sig, false, 37, g);
+  TEST_ASSERT_EQUAL_INT(409, v.status);
+  TEST_ASSERT_FALSE(v.applied);
+  TEST_ASSERT_EQUAL_UINT32(f.seq, g.last());
 }
 
 // ---------------------------------------------------------------- runner
@@ -676,6 +921,12 @@ int main(int, char **) {
   RUN_TEST(test_format_countdown);
   RUN_TEST(test_format_age);
   RUN_TEST(test_latest_observed);
+  RUN_TEST(test_blob_roundtrip);
+  RUN_TEST(test_blob_rejects);
+  RUN_TEST(test_persist_throttle);
+  RUN_TEST(test_clock_guards);
+  RUN_TEST(test_backoff_schedule);
+  RUN_TEST(test_seq_gate_seeded_after_restore);
 
   return UNITY_END();
 }

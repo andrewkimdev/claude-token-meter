@@ -1,5 +1,5 @@
 {
-  "description": "device just booted (last_seq null): any seq accepted",
+  "description": "device just booted with NO restored last_state in NVS (last_seq null): any seq accepted. With a restored last_state the gate is seeded (see frame_replay_after_restore.json)",
   "last_seq": null,
   "line": "{\"t\":\"state\",\"v\":1,\"seq\":5,\"sent_at\":1791180000,\"windows\":{\"five_hour\":{\"pct\":52,\"resets_at\":1791186600,\"observed_at\":1791179913},\"seven_day\":{\"pct\":29,\"resets_at\":1791511200,\"observed_at\":1791179913}}}",
   "expected": {

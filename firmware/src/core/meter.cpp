@@ -20,9 +20,18 @@ Level levelFor(float pct, float pace) {
   return Level::Neutral;
 }
 
-WindowView makeView(const Window &w, int64_t now, int64_t windowLen) {
+bool clockUsable(bool clockSet, int64_t now) { return clockSet && now >= MIN_VALID_EPOCH; }
+
+WindowView makeView(const Window &w, int64_t now, int64_t windowLen, bool clockOk) {
   WindowView v;
   if (!w.present) return v;
+  if (!clockOk) {
+    v.state = WinState::NoClock;
+    v.pct = w.pct;
+    v.pctInt = static_cast<int>(std::lround(w.pct));
+    v.level = w.pct >= 95 ? Level::Red : w.pct >= 80 ? Level::Orange : Level::Neutral;
+    return v;
+  }
   if (w.resets_at <= now) {
     v.state = WinState::Reset;   // estimated: window rolled over since observation
     v.pace = 0;
@@ -59,6 +68,13 @@ char *formatAge(int64_t secs, char *buf, size_t n) {
   else if (s < 3600)  std::snprintf(buf, n, "%ldm ago", s / 60);
   else if (s < 86400) std::snprintf(buf, n, "%ldh ago", s / 3600);
   else                std::snprintf(buf, n, "%ldd ago", s / 86400);
+  return buf;
+}
+
+char *formatAgeOrDash(bool clockOk, int64_t now, int64_t obs, char *buf, size_t n) {
+  if (!clockOk) std::snprintf(buf, n, "--");
+  else if (obs <= 0) std::snprintf(buf, n, "no data");
+  else formatAge(now - obs, buf, n);
   return buf;
 }
 

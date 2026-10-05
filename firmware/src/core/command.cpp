@@ -80,6 +80,16 @@ int formatInfo(const InfoFields &f, const char *fw, char *buf, size_t n) {
       fw, f.host ? f.host : "", f.ip ? f.ip : "", f.rssi, static_cast<long long>(f.uptimeS),
       static_cast<unsigned long>(f.lastSeq), f.provisioned ? "true" : "false");
   if (k < 0 || static_cast<size_t>(k) >= n) return k;
+  int kh = std::snprintf(buf + k, n - k,
+                         ",\"reconnects\":%lu,\"disc_reason\":%u,\"heap_free\":%lu,"
+                         "\"heap_min\":%lu,\"reset\":\"%s\",\"restored\":%s",
+                         static_cast<unsigned long>(f.reconnects),
+                         static_cast<unsigned>(f.discReason),
+                         static_cast<unsigned long>(f.heapFree),
+                         static_cast<unsigned long>(f.heapMin), f.reset ? f.reset : "",
+                         f.restored ? "true" : "false");
+  if (kh < 0 || static_cast<size_t>(k + kh) >= n) return kh < 0 ? kh : k + kh;
+  k += kh;
   int k2 = f.wifi ? std::snprintf(buf + k, n - k, ",\"wifi\":\"%s\"}", f.wifi)
                   : std::snprintf(buf + k, n - k, "}");
   return k2 < 0 ? k2 : k + k2;

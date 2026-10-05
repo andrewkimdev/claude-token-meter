@@ -7,7 +7,7 @@
 namespace ctm {
 
 constexpr int PROTOCOL_VERSION = 1;
-constexpr const char *FW_VERSION = "0.2.0";
+constexpr const char *FW_VERSION = "0.3.0";
 constexpr const char *BOARD = "t-display";
 constexpr size_t MAX_LINE = 1024;   // §4.1
 
@@ -37,8 +37,11 @@ enum class ParseStatus {
 ParseStatus parseStateFrame(const char *line, size_t len, StateFrame &out,
                             uint32_t &seqOut);
 
-// §3 seq rules. First frame after boot is always accepted. Otherwise
-// accept seq > last, or the bridge-restart case (seq == 1 && seq < last).
+// §3 seq rules. With no last_seq (fresh boot and nothing restored from NVS)
+// the first frame is accepted. Otherwise accept seq > last, or the
+// bridge-restart case (seq == 1 && seq < last). P5: at boot the gate is
+// seeded (commit) from the last_seq restored from NVS, so a reboot no longer
+// reopens it to replays.
 class SeqGate {
  public:
   bool wouldAccept(uint32_t seq) const;

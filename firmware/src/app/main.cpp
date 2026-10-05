@@ -1,26 +1,35 @@
-// Claude Token Meter -- P4: USB serial + WiFi HTTP (HMAC-signed) transports,
-// USB provisioning commands, P3 display. The only entry point in src/ (gotcha 3.14).
+// Claude Token Meter -- P5: USB serial + WiFi HTTP (HMAC-signed) transports,
+// USB provisioning commands, P3 display, last_state restore (NVS), WiFi
+// rejoin backoff, loop task WDT. The only entry point in src/ (gotcha 3.14).
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <WiFi.h>
+#include <esp_system.h>
+#include <esp_task_wdt.h>
 #include <sys/time.h>
 #include <time.h>
 
 #include "../core/command.h"
 #include "../core/http_accept.h"
 #include "../core/meter.h"
+#include "../core/persist.h"
 #include "../core/protocol.h"
 #include "../core/view_state.h"
 #include "../ui/buttons.h"
 #include "../ui/display.h"
 #include "../ui/render.h"
 #include "config_store.h"
+#include "state_store.h"
 #include "wifi_link.h"
 
 namespace {
 
 constexpr uint32_t REDRAW_MS = 1000;
 constexpr uint32_t PROVISION_TIMEOUT_MS = 15u * 1000u;   // PROTOCOL §4.3
+constexpr uint32_t WDT_TIMEOUT_S = 15;                    // loop task; scan blocks 2-4 s
+constexpr uint32_t HEAP_WARN_B = 40u * 1024u;
+constexpr uint32_t HEAP_CHECK_MS = 10u * 1000u;
+constexpr uint32_t HEAP_WARN_EVERY_MS = 60u * 1000u;
 
 bool          displayOk = false;
 ctm::SeqGate  seqGate;
@@ -30,6 +39,11 @@ uint32_t      lastFrameMs = 0;
 uint32_t      lastDrawMs = 0;
 bool          dirty = true;
 bool          clockSet = false;   // device clock set from an accepted frame (§4.2 skew check)
+ctm::PersistThrottle persist;     // P5 last_state -> NVS, wear-limited
+const char   *resetName = "";
+uint32_t      lastHeapCheckMs = 0;
+uint32_t      lastHeapWarnMs = 0;
+bool          heapWarned = false;
 
 DeviceConfig  cfg;                // NVS mirror; holds secrets -- never print
 bool          provPending = false;
@@ -65,10 +79,30 @@ void sendNak(uint32_t seq, const char *err) {
   reply(b);
 }
 
-// An accepted frame (either transport): clock, model, UI timers.
+const char *resetReasonName(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON:   return "poweron";
+    case ESP_RST_EXT:       return "ext";
+    case ESP_RST_SW:        return "sw";
+    case ESP_RST_PANIC:     return "panic";
+    case ESP_RST_INT_WDT:   return "int_wdt";
+    case ESP_RST_TASK_WDT:  return "task_wdt";
+    case ESP_RST_WDT:       return "wdt";
+    case ESP_RST_DEEPSLEEP: return "deepsleep";
+    case ESP_RST_BROWNOUT:  return "brownout";
+    case ESP_RST_SDIO:      return "sdio";
+    default:                return "unknown";
+  }
+}
+
+// An accepted frame (either transport): clock, model, UI timers, persistence.
 void applyFrame(const ctm::StateFrame &f, bool viaWifi) {
   // Auto-dim timer restarts only when the shown values change (not heartbeats).
-  if (!model.haveFrame || ctm::windowsChanged(model.frame, f)) ui.onWindowsChanged(millis());
+  // Restored values count as "shown": a live frame equal to them is no change.
+  if (!model.haveFrame || ctm::windowsChanged(model.frame, f)) {
+    ui.onWindowsChanged(millis());
+    persist.offer(f);   // written by pollPersist() when the throttle allows
+  }
 
   struct timeval tv = {static_cast<time_t>(f.sent_at), 0};
   settimeofday(&tv, nullptr);   // §3: device clock follows sent_at, no NTP
@@ -76,6 +110,7 @@ void applyFrame(const ctm::StateFrame &f, bool viaWifi) {
 
   model.frame = f;
   model.haveFrame = true;
+  model.restored = false;
   model.viaWifi = viaWifi;
   lastFrameMs = millis();
   dirty = true;
@@ -92,6 +127,12 @@ void buildInfo(char *buf, size_t n, bool usb) {
   f.lastSeq = seqGate.last();
   f.provisioned = cfg.provisioned;
   f.wifi = usb ? wifiStateName(wifiState()) : nullptr;
+  f.reconnects = wifiReconnects();
+  f.discReason = wifiLastReason();
+  f.heapFree = ESP.getFreeHeap();
+  f.heapMin = ESP.getMinFreeHeap();
+  f.reset = resetName;
+  f.restored = model.restored;
   ctm::formatInfo(f, ctm::FW_VERSION, buf, n);
 }
 
@@ -211,7 +252,7 @@ bool dispatchCommand(const char *line, size_t len) {
       cmdScan();
       break;
     case ctm::CmdType::Info: {
-      char b[256];
+      char b[ctm::INFO_BUF];
       buildInfo(b, sizeof b, true);
       reply(b);
       break;
@@ -273,6 +314,36 @@ void pollUi() {
   }
 }
 
+// P5: flush the pending last_state when the wear throttle allows.
+void pollPersist() {
+  uint32_t now = millis();
+  if (!persist.due(now)) return;
+  const ctm::StateFrame &f = persist.pendingFrame();
+  bool urgent = persist.urgent();
+  if (stateSave(f)) {
+    persist.written(now);
+    Serial.printf("log: last_state saved seq=%lu%s\n", (unsigned long)f.seq,
+                  urgent ? " (new window)" : "");
+  } else {
+    persist.failed(now);
+    Serial.println("log: last_state save failed (retry in 5 min)");
+  }
+}
+
+// P5: low-heap warning (rate-limited) + low-water mark lives in ESP.getMinFreeHeap().
+void pollHeap() {
+  uint32_t now = millis();
+  if (now - lastHeapCheckMs < HEAP_CHECK_MS) return;
+  lastHeapCheckMs = now;
+  uint32_t freeB = ESP.getFreeHeap();
+  if (freeB < HEAP_WARN_B && (!heapWarned || now - lastHeapWarnMs >= HEAP_WARN_EVERY_MS)) {
+    heapWarned = true;
+    lastHeapWarnMs = now;
+    Serial.printf("log: WARN low heap free=%lu min=%lu largest=%lu\n", (unsigned long)freeB,
+                  (unsigned long)ESP.getMinFreeHeap(), (unsigned long)ESP.getMaxAllocHeap());
+  }
+}
+
 void pollSerial() {
   while (Serial.available() > 0) {
     int c = Serial.read();
@@ -316,9 +387,37 @@ void setup() {
   setenv("TZ", "KST-9", 1);
   tzset();
 
+  resetName = resetReasonName(esp_reset_reason());
+  Serial.printf("log: boot fw=%s reset=%s\n", ctm::FW_VERSION, resetName);
+
+  // Loop task WDT (P5): 15 s, panics -> reboot with reset=task_wdt visible in
+  // info. Only a genuinely stuck loop trips it; the longest legit block is a
+  // WiFi scan (2-4 s, fed around it). Also raises the idle-task TWDT to 15 s.
+  esp_task_wdt_init(WDT_TIMEOUT_S, true);
+  esp_task_wdt_add(nullptr);   // this (loop) task
+
   // Sprite first, before anything else touches the heap.
   displayOk = displayInit();
   buttonsInit();
+
+  // P5 last_state: show the last known values with a "restored" marker until
+  // a live frame arrives. The clock cannot be set from it (it would be stale),
+  // so countdowns/ages render "--". The seq gate is seeded so a reboot does
+  // not reopen it to replays of older captured frames (PROTOCOL §3).
+  {
+    ctm::StateFrame st;
+    if (stateLoad(st)) {
+      seqGate.commit(st.seq);
+      persist.seed(st);
+      model.frame = st;
+      model.haveFrame = true;
+      model.restored = true;
+      Serial.printf("log: restored last_state seq=%lu 5h=%s 7d=%s\n", (unsigned long)st.seq,
+                    st.five_hour.present ? "y" : "n", st.seven_day.present ? "y" : "n");
+    } else {
+      Serial.println("log: no last_state in nvs");
+    }
+  }
 
   wifiLinkInit(onHttpState, onHttpInfo);
   model.host = wifiHost();
@@ -349,19 +448,26 @@ void setup() {
 }
 
 void loop() {
+  esp_task_wdt_reset();
   pollSerial();
   wifiPoll();
   pollProvision();
   pollUi();
+  pollPersist();
+  pollHeap();
 
   uint32_t nowMs = millis();
   if (displayOk && (dirty || nowMs - lastDrawMs >= REDRAW_MS)) {
     model.now = static_cast<int64_t>(time(nullptr));
-    model.frameAgeS = model.haveFrame ? (nowMs - lastFrameMs) / 1000u : 0;
+    model.frameAgeS = (model.haveFrame && !model.restored) ? (nowMs - lastFrameMs) / 1000u : 0;
     model.link = ctm::linkStateFor(model.frameAgeS);
     model.lastSeq = seqGate.last();
     model.uptimeS = nowMs / 1000u;   // [?] wraps after ~49.7 days of uptime
     model.freeHeap = ESP.getFreeHeap();
+    model.minHeap = ESP.getMinFreeHeap();
+    model.clockOk = ctm::clockUsable(clockSet, model.now);
+    model.reconnects = wifiReconnects();
+    model.discReason = wifiLastReason();
     model.view = ui.view();
     model.toast = ui.toast();
     model.provisioned = cfg.provisioned;
