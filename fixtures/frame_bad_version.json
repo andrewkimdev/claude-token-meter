@@ -1,0 +1,9 @@
+{
+  "description": "v != 1 is rejected",
+  "last_seq": null,
+  "line": "{\"t\":\"state\",\"v\":2,\"seq\":10,\"sent_at\":1791180000,\"windows\":{\"five_hour\":{\"pct\":52,\"resets_at\":1791186600,\"observed_at\":1791179913},\"seven_day\":{\"pct\":29,\"resets_at\":1791511200,\"observed_at\":1791179913}}}",
+  "expected": {
+    "result": "nak",
+    "err": "bad_v"
+  }
+}

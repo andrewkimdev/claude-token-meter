@@ -1,0 +1,63 @@
+{
+  "description": "same resets_at = same window: max pct, max observed_at",
+  "now": 1791180000,
+  "sessions": [
+    {
+      "session_id": "a",
+      "observed_at": 1791179913.2,
+      "cc_version": "2.1.289",
+      "rate_limits": {
+        "five_hour": {
+          "used_percentage": 52,
+          "resets_at": 1791186600
+        },
+        "seven_day": {
+          "used_percentage": 29,
+          "resets_at": 1791511200
+        }
+      }
+    },
+    {
+      "session_id": "b",
+      "observed_at": 1791179950.9,
+      "cc_version": "2.1.289",
+      "rate_limits": {
+        "five_hour": {
+          "used_percentage": 48,
+          "resets_at": 1791186600
+        },
+        "seven_day": {
+          "used_percentage": 27,
+          "resets_at": 1791511200
+        }
+      }
+    },
+    {
+      "session_id": "c",
+      "observed_at": 1791179000.0,
+      "cc_version": "2.1.289",
+      "rate_limits": {
+        "five_hour": {
+          "used_percentage": 40,
+          "resets_at": 1791186600
+        },
+        "seven_day": {
+          "used_percentage": 29,
+          "resets_at": 1791511200
+        }
+      }
+    }
+  ],
+  "expected": {
+    "five_hour": {
+      "pct": 52,
+      "resets_at": 1791186600,
+      "observed_at": 1791179950
+    },
+    "seven_day": {
+      "pct": 29,
+      "resets_at": 1791511200,
+      "observed_at": 1791179950
+    }
+  }
+}

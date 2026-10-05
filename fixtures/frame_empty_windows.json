@@ -1,0 +1,9 @@
+{
+  "description": "no known windows at all is still a valid frame",
+  "last_seq": 2,
+  "line": "{\"t\":\"state\",\"v\":1,\"seq\":3,\"sent_at\":1791180000,\"windows\":{}}",
+  "expected": {
+    "result": "ack",
+    "windows": {}
+  }
+}

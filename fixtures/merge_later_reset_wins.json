@@ -1,0 +1,35 @@
+{
+  "description": "later resets_at is a newer window and replaces a higher pct from the old window",
+  "now": 1791180000,
+  "sessions": [
+    {
+      "session_id": "old",
+      "observed_at": 1791170000.0,
+      "cc_version": "2.1.289",
+      "rate_limits": {
+        "five_hour": {
+          "used_percentage": 90,
+          "resets_at": 1791181000
+        }
+      }
+    },
+    {
+      "session_id": "new",
+      "observed_at": 1791179900.0,
+      "cc_version": "2.1.289",
+      "rate_limits": {
+        "five_hour": {
+          "used_percentage": 5,
+          "resets_at": 1791198000
+        }
+      }
+    }
+  ],
+  "expected": {
+    "five_hour": {
+      "pct": 5,
+      "resets_at": 1791198000,
+      "observed_at": 1791179900
+    }
+  }
+}

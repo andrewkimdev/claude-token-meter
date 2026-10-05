@@ -29,4 +29,11 @@ LilyGO T-Display(클래식 ESP32)에 현재 Mac에 로그인된 Claude 구독 �
 - 업로드 속도: 460800
 
 ## 현재 상태
-기획 완료(v0). 다음 단계는 P0 스파이크다. statusLine JSON을 실측하고, launchd 프로세스의 로컬 네트워크 권한을 확인한다.
+- **P1 완료 `[V]`.** 경로는 statusLine(`host/ctm/statusline.py`) → `~/.claude-token-meter/sessions/` → 브리지 → USB → 디바이스다. 모의 값 변화가 약 1초 만에 화면까지 전달되고 ACK를 받는다.
+- 브리지 실행: `cd host && ~/.platformio/penv/bin/python3 -m ctm.bridge`. 브리지가 포트를 TIOCEXCL로 소유한다.
+  - 업로드할 때: `kill -USR1 $(cat ~/.claude-token-meter/serial/hold.pid)`로 해제 → 업로드 → 같은 명령으로 재획득.
+  - 브리지가 꺼져 있을 때는 `tools/serial_hold.py`로 포트를 붙잡는다.
+- 대상 보드: USB 시리얼 `5915018996`. **이 번호를 확인한 포트에만 업로드한다.**
+- 호스트 테스트: `cd host && /usr/bin/python3 -m unittest discover -s tests -t .`
+- 펌웨어 빌드: `~/.platformio/penv/bin/pio run -d firmware -e t-display`
+- 다음: P2(native 테스트로 fixtures 공유), P3(디스플레이 다듬기).

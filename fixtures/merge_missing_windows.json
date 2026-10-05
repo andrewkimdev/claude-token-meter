@@ -1,0 +1,52 @@
+{
+  "description": "sessions may carry only one window; null/empty rate_limits contribute nothing",
+  "now": 1791180000,
+  "sessions": [
+    {
+      "session_id": "only7",
+      "observed_at": 1791179000.0,
+      "cc_version": "2.1.289",
+      "rate_limits": {
+        "seven_day": {
+          "used_percentage": 13,
+          "resets_at": 1791511200
+        }
+      }
+    },
+    {
+      "session_id": "only5",
+      "observed_at": 1791179500.0,
+      "cc_version": "2.1.289",
+      "rate_limits": {
+        "five_hour": {
+          "used_percentage": 52,
+          "resets_at": 1791186600
+        }
+      }
+    },
+    {
+      "session_id": "nul",
+      "observed_at": 1791179999.0,
+      "cc_version": "2.1.289",
+      "rate_limits": null
+    },
+    {
+      "session_id": "empty",
+      "observed_at": 1791179999.0,
+      "cc_version": "2.1.289",
+      "rate_limits": {}
+    }
+  ],
+  "expected": {
+    "five_hour": {
+      "pct": 52,
+      "resets_at": 1791186600,
+      "observed_at": 1791179500
+    },
+    "seven_day": {
+      "pct": 13,
+      "resets_at": 1791511200,
+      "observed_at": 1791179000
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "description": "seq == 1 < last_seq: bridge restarted, accepted",
+  "last_seq": 17,
+  "line": "{\"t\":\"state\",\"v\":1,\"seq\":1,\"sent_at\":1791180000,\"windows\":{\"five_hour\":{\"pct\":52,\"resets_at\":1791186600,\"observed_at\":1791179913},\"seven_day\":{\"pct\":29,\"resets_at\":1791511200,\"observed_at\":1791179913}}}",
+  "expected": {
+    "result": "ack",
+    "windows": {
+      "five_hour": {
+        "pct": 52,
+        "resets_at": 1791186600
+      },
+      "seven_day": {
+        "pct": 29,
+        "resets_at": 1791511200
+      }
+    }
+  }
+}

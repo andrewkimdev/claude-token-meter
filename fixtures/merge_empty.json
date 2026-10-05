@@ -1,0 +1,6 @@
+{
+  "description": "no sessions -> no windows",
+  "now": 1791180000,
+  "sessions": [],
+  "expected": {}
+}

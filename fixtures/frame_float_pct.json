@@ -1,0 +1,14 @@
+{
+  "description": "pct may be a float",
+  "last_seq": null,
+  "line": "{\"t\":\"state\",\"v\":1,\"seq\":9,\"sent_at\":1791180000,\"windows\":{\"five_hour\":{\"pct\":41.5,\"resets_at\":1791186600,\"observed_at\":1791179913}}}",
+  "expected": {
+    "result": "ack",
+    "windows": {
+      "five_hour": {
+        "pct": 41.5,
+        "resets_at": 1791186600
+      }
+    }
+  }
+}

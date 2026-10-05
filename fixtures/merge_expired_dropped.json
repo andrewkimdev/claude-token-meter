@@ -1,0 +1,39 @@
+{
+  "description": "resets_at <= now is dropped (equality included); window omitted if nothing remains",
+  "now": 1791180000,
+  "sessions": [
+    {
+      "session_id": "a",
+      "observed_at": 1791160000.0,
+      "cc_version": "2.1.289",
+      "rate_limits": {
+        "five_hour": {
+          "used_percentage": 77,
+          "resets_at": 1791170000
+        },
+        "seven_day": {
+          "used_percentage": 29,
+          "resets_at": 1791511200
+        }
+      }
+    },
+    {
+      "session_id": "b",
+      "observed_at": 1791161000.0,
+      "cc_version": "2.1.289",
+      "rate_limits": {
+        "five_hour": {
+          "used_percentage": 80,
+          "resets_at": 1791180000
+        }
+      }
+    }
+  ],
+  "expected": {
+    "seven_day": {
+      "pct": 29,
+      "resets_at": 1791511200,
+      "observed_at": 1791160000
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "description": "truncated JSON",
+  "last_seq": null,
+  "line": "{\"t\":\"state\",\"v\":1,\"seq\":5,\"sent_at\":179",
+  "expected": {
+    "result": "nak",
+    "err": "parse"
+  }
+}
