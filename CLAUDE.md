@@ -39,4 +39,6 @@ LilyGO T-Display(클래식 ESP32)에 현재 Mac에 로그인된 Claude 구독 �
 - **P2 완료 `[V]`**: `bash tools/check_fixtures.sh`는 호스트 unittest와 `pio test -e native`를 함께 돌리고, 둘 중 하나라도 실패하면 결론을 내지 않는다(fail-closed). 프레임 fixture 16개에서 양쪽 판정이 일치한다.
 - **P3 완료 (빌드 `[V]`, 버튼과 디밍은 실기 미검증 `[?]`)**: 상세 뷰(BTN1), 백라이트 3단(BTN2), 60분 무변화 시 자동 디밍, host offline 표시를 넣었다.
   - `tools/preview.py`로 화면을 PNG로 미리 볼 수 있다. `render.cpp`를 바꾸면 `preview.py`도 함께 바꾼다.
-- 다음: P4(WiFi와 `ctm setup` 프로비저닝).
+- **P4 완료 `[V]`**: 디바이스는 `ctmeter-8f70`이다. 브리지를 `--transport auto`로 띄우면 USB가 있으면 USB로, 없으면 WiFi(서명된 HTTP)로 보낸다.
+  - `ctm setup`은 반드시 일반 터미널에서 실행한다(`!` 불가).
+- 다음: P5(견고성. Mac 슬립/웨이크, 공유기 재부팅, IP 변경, 장시간 운용), P6(LaunchAgent 설치, README).
