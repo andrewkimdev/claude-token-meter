@@ -3,3 +3,5 @@
 __pycache__/
 *.pyc
 firmware/src/config/secrets.h
+tools/preview_out/
+tools/.venv/

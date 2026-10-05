@@ -1,0 +1,9 @@
+{
+  "description": "seq starts at 1; 0 is malformed",
+  "last_seq": null,
+  "line": "{\"t\":\"state\",\"v\":1,\"seq\":0,\"sent_at\":1791180000,\"windows\":{}}",
+  "expected": {
+    "result": "nak",
+    "err": "parse"
+  }
+}

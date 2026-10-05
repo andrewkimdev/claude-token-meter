@@ -1,5 +1,7 @@
 #include "render.h"
 
+#include <time.h>
+
 #include "../core/meter.h"
 #include "display.h"
 
@@ -114,9 +116,17 @@ void drawSevenDay(const WindowView &v) {
 }
 
 void drawFooter(const RenderModel &m) {
-  spr.fillCircle(PAD + 4, Y_FOOT + 8, 4, m.linkFresh ? C_GREEN : C_DIM);
-  spr.setTextColor(m.linkFresh ? C_TEXT : C_DIM);
-  spr.drawString("USB", PAD + 12, Y_FOOT, 2);
+  // Dot: green <=150s since last frame, grey <=300s, red + "host offline" after.
+  uint16_t dot = C_GREEN, txt = C_TEXT;
+  const char *label = "USB";
+  if (m.link == LinkState::Stale) {
+    dot = C_DIM; txt = C_DIM;
+  } else if (m.link == LinkState::Offline) {
+    dot = C_RED; txt = C_RED; label = "host offline";
+  }
+  spr.fillCircle(PAD + 4, Y_FOOT + 8, 4, dot);
+  spr.setTextColor(txt);
+  spr.drawString(label, PAD + 12, Y_FOOT, 2);
 
   int64_t obs = latestObserved(m.frame);
   char buf[16];
@@ -124,6 +134,82 @@ void drawFooter(const RenderModel &m) {
   spr.setTextColor(C_DIM);
   spr.drawString(obs > 0 ? formatAge(m.now - obs, buf, sizeof buf) : "no data",
                  RIGHT, Y_FOOT, 2);
+  spr.setTextDatum(TL_DATUM);
+}
+
+// ---- Detail view (BTN1). Font 2 rows, label column + value column. ----
+constexpr int DET_Y0 = 2, DET_DY = 16, DET_VX = 76;
+
+void detailRow(int row, const char *label, const char *value, uint16_t col) {
+  int y = DET_Y0 + row * DET_DY;
+  spr.setTextColor(C_DIM);
+  spr.drawString(label, PAD, y, 2);
+  spr.setTextColor(col);
+  spr.drawString(value, DET_VX, y, 2);
+}
+
+// Absolute reset time in local time (TZ env, KST-9 -- gotcha 3.3).
+void resetRow(int row, const char *label, const Window &w, int64_t now) {
+  char buf[32];
+  if (!w.present) {
+    detailRow(row, label, "--", C_DIM);
+    return;
+  }
+  time_t t = static_cast<time_t>(w.resets_at);
+  struct tm lt;
+  localtime_r(&t, &lt);
+  if (w.resets_at > now) {
+    strftime(buf, sizeof buf, "%a %m-%d %H:%M", &lt);
+    detailRow(row, label, buf, C_TEXT);
+  } else {
+    strftime(buf, sizeof buf, "passed %a %H:%M", &lt);
+    detailRow(row, label, buf, C_DIM);
+  }
+}
+
+void drawDetail(const RenderModel &m) {
+  char buf[40], a[16];
+  resetRow(0, "5H reset", m.frame.five_hour, m.now);
+  resetRow(1, "7D reset", m.frame.seven_day, m.now);
+
+  int64_t obs = latestObserved(m.frame);
+  detailRow(2, "data age", obs > 0 ? formatAge(m.now - obs, a, sizeof a) : "no data",
+            C_TEXT);
+
+  snprintf(buf, sizeof buf, "%lu", (unsigned long)m.lastSeq);
+  detailRow(3, "last seq", buf, C_TEXT);
+
+  uint16_t lc = m.link == LinkState::Fresh ? C_GREEN
+              : m.link == LinkState::Stale ? C_DIM : C_RED;
+  if (m.haveFrame) {
+    snprintf(buf, sizeof buf, "USB, frame %s", formatAge(m.frameAgeS, a, sizeof a));
+    detailRow(4, "link", buf, lc);
+  } else {
+    detailRow(4, "link", "USB, no frame yet", C_DIM);
+  }
+
+  detailRow(5, "uptime", formatCountdown(m.uptimeS, a, sizeof a), C_TEXT);
+
+  snprintf(buf, sizeof buf, "%lu B", (unsigned long)m.freeHeap);
+  detailRow(6, "free heap", buf, C_TEXT);
+
+  snprintf(buf, sizeof buf, "fw %s  KST", FW_VERSION);
+  int y = DET_Y0 + 7 * DET_DY;
+  spr.setTextColor(C_DIM);
+  spr.drawString(buf, PAD, y, 2);
+  spr.setTextDatum(TR_DATUM);
+  spr.drawString("BTN1: back", RIGHT, y, 2);
+  spr.setTextDatum(TL_DATUM);
+}
+
+void drawToast(const char *msg) {
+  constexpr int TW = 160, TH = 30;
+  int x = (SCR_W - TW) / 2, y = (SCR_H - TH) / 2;
+  spr.fillRoundRect(x, y, TW, TH, 6, TFT_BLACK);
+  spr.drawRoundRect(x, y, TW, TH, 6, C_TEXT);
+  spr.setTextDatum(MC_DATUM);
+  spr.setTextColor(C_TEXT);
+  spr.drawString(msg, SCR_W / 2, SCR_H / 2, 2);
   spr.setTextDatum(TL_DATUM);
 }
 
@@ -145,12 +231,15 @@ void drawWaiting() {
 void render(const RenderModel &m) {
   spr.fillSprite(TFT_BLACK);
   spr.setTextDatum(TL_DATUM);
-  if (!m.haveFrame) {
+  if (m.view == View::Detail) {
+    drawDetail(m);
+  } else if (!m.haveFrame) {
     drawWaiting();
   } else {
     drawFiveHour(makeView(m.frame.five_hour, m.now, FIVE_HOUR_S));
     drawSevenDay(makeView(m.frame.seven_day, m.now, SEVEN_DAY_S));
     drawFooter(m);
   }
+  if (m.toast) drawToast(m.toast);
   spr.pushSprite(0, 0);
 }

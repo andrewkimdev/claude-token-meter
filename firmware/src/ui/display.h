@@ -11,3 +11,7 @@ extern TFT_eSprite spr;
 // setup(), before anything heap-heavy. Returns false (with a message already
 // on screen and Serial) on failure; caller must not use `spr` then.
 bool displayInit();
+
+// Backlight PWM duty 0..255 via LEDC. API differs between Arduino core 2.x and
+// 3.x (gotcha 3.6), guarded by ESP_ARDUINO_VERSION_MAJOR. Main task only.
+void setBacklight(uint8_t duty);

@@ -1,5 +1,7 @@
 #include "display.h"
 
+#include <esp_arduino_version.h>
+
 TFT_eSPI    tft = TFT_eSPI();
 TFT_eSprite spr = TFT_eSprite(&tft);
 
@@ -28,4 +30,18 @@ bool displayInit() {
     return false;
   }
   return true;
+}
+
+void setBacklight(uint8_t duty) {
+  static bool inited = false;
+  static int  last = -1;
+  if (duty == last) return;
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  if (!inited) { ledcAttach(TFT_BL, 5000, 8); inited = true; }
+  ledcWrite(TFT_BL, duty);
+#else
+  if (!inited) { ledcSetup(0, 5000, 8); ledcAttachPin(TFT_BL, 0); inited = true; }
+  ledcWrite(0, duty);
+#endif
+  last = duty;
 }

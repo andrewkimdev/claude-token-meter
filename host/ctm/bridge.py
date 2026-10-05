@@ -39,6 +39,7 @@ READ_TIMEOUT_S = 0.5      # serial read blocks at most this long -> no busy loop
 WRITE_TIMEOUT_S = 2.0
 POLL_S = 2.0              # sessions dir poll period
 MIN_INTERVAL_S = 2.0      # P1 (USB). ARCHITECTURE: 30s for WiFi (P4).
+NAK_RETRY_S = 1.0
 HEARTBEAT_S = 120.0
 PRUNE_EVERY_S = 3600.0
 ABSENT_RETRY_S = 1.0
@@ -101,6 +102,8 @@ class Bridge(object):
         self.paused = False
         self.stop = False
         self.force_send = False
+        self.retry_at = None
+        self.last_reason = None
         self.last_sent_key = None
         self.last_sent_at = None
         self.last_poll = None
@@ -156,6 +159,8 @@ class Bridge(object):
         """Should a frame be sent now? Returns reason string or None."""
         if self.force_send:
             return "force"
+        if self.retry_at is not None and now >= self.retry_at:
+            return "retry"
         if self.last_sent_at is None:
             return "first"
         elapsed = now - self.last_sent_at
@@ -168,7 +173,9 @@ class Bridge(object):
     def send(self, now, reason):
         frame = self.current_frame(now)
         data = _proto.encode_frame(frame)
-        self.port.write(data)
+        # Leading "\n" terminates any partial line left in the device's RX
+        # buffer (e.g. a frame cut by a reset); the device ignores empty lines.
+        self.port.write(b"\n" + data)
         try:
             self.port.flush()
         except Exception:
@@ -177,6 +184,8 @@ class Bridge(object):
         self.last_sent_at = now
         self.last_sent_key = windows_key(self.windows)
         self.force_send = False
+        self.retry_at = None
+        self.last_reason = reason
         self.log(">> " + data.decode("utf-8").rstrip("\n") + "  (" + reason + ")")
 
     # ---- device lines ----
@@ -194,6 +203,9 @@ class Bridge(object):
             self.force_send = True
         elif t == "nak":
             self.event("NAK seq=%s err=%s" % (msg.get("seq"), msg.get("err")))
+            # parse nak = likely line corruption: resend once (never retry a retry)
+            if msg.get("err") == "parse" and self.last_reason != "retry":
+                self.retry_at = self.clock() + NAK_RETRY_S
         elif t == "ack":
             if msg.get("seq") != self.seq:
                 self.event("ack for seq=%s (last sent %s)" % (msg.get("seq"), self.seq))

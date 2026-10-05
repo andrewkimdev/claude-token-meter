@@ -50,34 +50,50 @@ def _num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def _epoch(v):
+    return _num(v) and v >= 0 and v == v and v not in (float("inf"),)
+
+
 def device_accept(line, last_seq):
-    """Reference of the device rules. last_seq None = fresh boot.
-    Returns {"result": "ack"|"nak", "err"?: "parse|old_seq|bad_v",
+    """Reference of the device rules (firmware/src/core/protocol.cpp is the
+    authority; PROTOCOL.md §3.1). last_seq None = fresh boot.
+    Returns {"result": "ack"|"nak"|"ignored", "err"?: "parse|old_seq|bad_v",
              "windows"?: {key: {"pct","resets_at"}}}."""
     try:
         if len(line.encode("utf-8")) > MAX_LINE:
             raise ValueError("too long")
         f = json.loads(line)
-        if not isinstance(f, dict) or f.get("t") != "state":
-            raise ValueError("not state")
     except ValueError:
         return {"result": "nak", "err": "parse"}
-    if f.get("v") != VERSION:
+    if not isinstance(f, dict) or not isinstance(f.get("t"), str):
+        return {"result": "nak", "err": "parse"}
+    if f["t"] != "state":
+        return {"result": "ignored"}          # other message types: no reply
+    v = f.get("v")
+    if not (isinstance(v, int) and not isinstance(v, bool)) or v != VERSION:
         return {"result": "nak", "err": "bad_v"}
     seq = f.get("seq")
-    windows = f.get("windows")
-    if not (isinstance(seq, int) and not isinstance(seq, bool) and _num(f.get("sent_at"))
-            and isinstance(windows, dict)):
+    if not (isinstance(seq, int) and not isinstance(seq, bool) and 1 <= seq <= 0xFFFFFFFF):
         return {"result": "nak", "err": "parse"}
-    # seq <= last_seq is old, except a bridge restart (seq == 1 < last_seq).
-    if last_seq is not None and seq <= last_seq and not (seq == 1 and seq < last_seq):
-        return {"result": "nak", "err": "old_seq"}
+    if not _epoch(f.get("sent_at")):
+        return {"result": "nak", "err": "parse"}
+    windows = f.get("windows")
+    if windows is None:
+        windows = {}                          # windows optional -> empty
+    if not isinstance(windows, dict):
+        return {"result": "nak", "err": "parse"}
     out = {}
     for k in ("five_hour", "seven_day"):  # unknown keys ignored
         w = windows.get(k)
         if w is None:
             continue
-        if not (isinstance(w, dict) and _num(w.get("pct")) and _num(w.get("resets_at"))):
+        if not (isinstance(w, dict) and _num(w.get("pct")) and _epoch(w.get("resets_at"))):
             return {"result": "nak", "err": "parse"}
-        out[k] = {"pct": w["pct"], "resets_at": w["resets_at"]}
+        if w.get("observed_at") is not None and not _epoch(w["observed_at"]):
+            return {"result": "nak", "err": "parse"}
+        out[k] = {"pct": min(100, max(0, w["pct"])), "resets_at": w["resets_at"]}
+    # seq gate last: a malformed frame never advances it.
+    # seq <= last_seq is old, except a bridge restart (seq == 1 < last_seq).
+    if last_seq is not None and seq <= last_seq and not (seq == 1 and seq < last_seq):
+        return {"result": "nak", "err": "old_seq"}
     return {"result": "ack", "windows": out}

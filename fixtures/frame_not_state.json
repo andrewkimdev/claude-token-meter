@@ -1,0 +1,8 @@
+{
+  "description": "valid JSON, t != \"state\": ignored, no ack/nak (forward compat)",
+  "last_seq": 5,
+  "line": "{\"t\":\"provision\",\"v\":1}",
+  "expected": {
+    "result": "ignored"
+  }
+}

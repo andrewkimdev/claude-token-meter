@@ -36,4 +36,7 @@ LilyGO T-Display(클래식 ESP32)에 현재 Mac에 로그인된 Claude 구독 �
 - 대상 보드: USB 시리얼 `5915018996`. **이 번호를 확인한 포트에만 업로드한다.**
 - 호스트 테스트: `cd host && /usr/bin/python3 -m unittest discover -s tests -t .`
 - 펌웨어 빌드: `~/.platformio/penv/bin/pio run -d firmware -e t-display`
-- 다음: P2(native 테스트로 fixtures 공유), P3(디스플레이 다듬기).
+- **P2 완료 `[V]`**: `bash tools/check_fixtures.sh`는 호스트 unittest와 `pio test -e native`를 함께 돌리고, 둘 중 하나라도 실패하면 결론을 내지 않는다(fail-closed). 프레임 fixture 16개에서 양쪽 판정이 일치한다.
+- **P3 완료 (빌드 `[V]`, 버튼과 디밍은 실기 미검증 `[?]`)**: 상세 뷰(BTN1), 백라이트 3단(BTN2), 60분 무변화 시 자동 디밍, host offline 표시를 넣었다.
+  - `tools/preview.py`로 화면을 PNG로 미리 볼 수 있다. `render.cpp`를 바꾸면 `preview.py`도 함께 바꾼다.
+- 다음: P4(WiFi와 `ctm setup` 프로비저닝).

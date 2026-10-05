@@ -206,6 +206,30 @@ class SendPolicy(Base):
         self.assertNotIn("ack for seq", log)
 
 
+    def test_frames_start_with_newline(self):
+        # a leading newline cuts any partial line left in the device RX buffer
+        self.run_for(1)
+        self.assertTrue(self.ports[0].tx[0].startswith(b"\n{"))
+
+    def test_parse_nak_retries_once(self):
+        T = self.clock.t
+        write_session(self.home, "a", 50, int(T) + 3600, T)
+        self.run_for(1)
+        p = self.ports[0]
+        p.rx.append(b'@{"t":"nak","seq":0,"err":"parse"}\n')
+        self.run_for(2)
+        self.assertEqual([f["seq"] for f in self.all_frames()], [1, 2])
+        p.rx.append(b'@{"t":"nak","seq":0,"err":"parse"}\n')   # nak of the retry
+        self.run_for(5)
+        self.assertEqual([f["seq"] for f in self.all_frames()], [1, 2])  # no retry loop
+
+    def test_old_seq_nak_no_retry(self):
+        self.run_for(1)
+        self.ports[0].rx.append(b'@{"t":"nak","seq":1,"err":"old_seq"}\n')
+        self.run_for(5)
+        self.assertEqual(len(self.all_frames()), 1)
+
+
 class PortLifecycle(Base):
     def test_absent_waits_without_busy_loop(self):
         self.present = False

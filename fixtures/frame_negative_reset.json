@@ -1,0 +1,9 @@
+{
+  "description": "negative epoch is malformed",
+  "last_seq": 5,
+  "line": "{\"t\":\"state\",\"v\":1,\"seq\":6,\"sent_at\":1791180000,\"windows\":{\"five_hour\":{\"pct\":10,\"resets_at\":-5}}}",
+  "expected": {
+    "result": "nak",
+    "err": "parse"
+  }
+}

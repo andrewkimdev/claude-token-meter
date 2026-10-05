@@ -1,0 +1,9 @@
+{
+  "description": "windows key absent = empty windows -> ack",
+  "last_seq": 5,
+  "line": "{\"t\":\"state\",\"v\":1,\"seq\":6,\"sent_at\":1791180000}",
+  "expected": {
+    "result": "ack",
+    "windows": {}
+  }
+}

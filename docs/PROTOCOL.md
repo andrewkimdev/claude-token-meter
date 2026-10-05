@@ -37,6 +37,19 @@
 - 디바이스는 `sent_at`으로 시계를 맞춘다(`settimeofday`). NTP는 쓰지 않는다.
 - **하트비트**: 창 값이 바뀌지 않아도 같은 형식의 프레임을 120초마다 보낸다.
 
+### 3.1 수신 판정 규칙 (정본: `firmware/src/core/protocol.cpp`, 참조 구현: `host/ctm/proto.py:device_accept`)
+판정은 아래 순서대로 한다. 각 규칙은 `fixtures/frame_*.json`으로 양쪽에서 검증된다.
+
+1. JSON이 아니거나, 객체가 아니거나, `t`가 문자열이 아니면 `nak parse`.
+2. `t != "state"`이면 **무시한다(응답 없음)**. 앞으로 추가될 명령(`provision`, `scan` 등)과의 호환을 위해서다.
+3. `v != 1`이면 `nak bad_v`.
+4. `seq`가 1 이상 2³²−1 이하의 정수가 아니면 `nak parse`. 0은 무효다.
+5. `sent_at`, `resets_at`, `observed_at`이 0 이상의 유한한 수가 아니면 `nak parse`.
+6. `windows`가 없으면 빈 객체로 본다. 객체가 아닌 값이면 `nak parse`.
+7. `pct`가 0–100 범위를 벗어나면 거부하지 않고 0–100으로 잘라서 쓴다(clamp).
+8. `observed_at`이 없으면 `sent_at`으로 대체한다.
+9. 위 검사를 모두 통과한 뒤에 seq 규칙(§3)을 적용한다. 따라서 형식이 잘못된 프레임은 seq를 전진시키지 못한다.
+
 ## 4. 전송 계층
 
 ### 4.1 USB 시리얼 (P1)
