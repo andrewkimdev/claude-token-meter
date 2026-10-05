@@ -1,0 +1,7 @@
+{
+  "description": "first 63 hex chars of the correct sig",
+  "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "body": "{\"t\":\"state\",\"v\":1,\"seq\":1791180017,\"sent_at\":1791180000,\"windows\":{\"five_hour\":{\"pct\":52,\"resets_at\":1791186600,\"observed_at\":1791179913},\"seven_day\":{\"pct\":29,\"resets_at\":1791511200,\"observed_at\":1791179913}}}",
+  "sig": "15e18ee3536f9b474fbd9d13c68f819170a0f8920d1cd7dd82e4c3e548dd861",
+  "expected": "sig"
+}

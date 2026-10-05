@@ -38,7 +38,7 @@ bool UiController::onBtn1Short(uint32_t nowMs) {
 
 bool UiController::onBtn1Long(uint32_t nowMs) {
   if (wake(nowMs)) return true;
-  toast_ = "setup: P4";
+  toast_ = "run ctm setup";
   toastSinceMs_ = nowMs;
   return true;
 }

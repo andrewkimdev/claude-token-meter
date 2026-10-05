@@ -14,6 +14,9 @@ constexpr int64_t LINK_OFFLINE_S = 300;
 
 enum class LinkState { Fresh, Stale, Offline };
 
+// WiFi STA as shown on screen / in info (P4). Off = unprovisioned or unpaired.
+enum class WifiState : uint8_t { Off, Connecting, Connected };
+
 // secsSinceFrame: seconds since the last *accepted* frame (device uptime
 // clock, not the host clock). <=150 Fresh, <=300 Stale, else Offline.
 LinkState linkStateFor(int64_t secsSinceFrame);
@@ -35,7 +38,7 @@ class UiController {
   // Button events. Return true if the screen needs a redraw.
   // While auto-dimmed, any press only wakes the backlight (press is consumed).
   bool onBtn1Short(uint32_t nowMs);   // toggle Main <-> Detail
-  bool onBtn1Long(uint32_t nowMs);    // reserved: toast "setup: P4"
+  bool onBtn1Long(uint32_t nowMs);    // reserved: toast "run ctm setup"
   bool onBtn2Short(uint32_t nowMs);   // cycle backlight 100/40/10 %
 
   // Call when an accepted frame changed the windows (and for the first frame).

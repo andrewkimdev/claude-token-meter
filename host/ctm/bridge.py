@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""ctm-bridge (P1, USB serial transport). PROTOCOL v1 §2-§4.1.
+"""ctm-bridge (USB serial + WiFi HTTP transports). PROTOCOL v1 §2-§4.2.
 
-Run:  cd host && ~/.platformio/penv/bin/python3 -m ctm.bridge
+Run:  cd host && ~/.platformio/penv/bin/python3 -m ctm.bridge [--transport auto|usb|wifi]
       ~/.platformio/penv/bin/python3 host/ctm/bridge.py --once
+
+- Transport (§4.2): auto = USB while the target USB serial device is
+  present, else WiFi if paired (device.json + Keychain key), else wait.
+  WiFi: signed POST http://<host>.local/v1/state, min interval 30s,
+  heartbeat 120s, exponential backoff (max 10 min) on failure.
 
 - Owns the target serial port like tools/serial_hold.py: found by USB serial
   number (CTM_USB_SERIAL), opened with DTR/RTS low, then TIOCEXCL.
@@ -28,17 +33,30 @@ import time
 try:
     from ctm import merge as _merge
     from ctm import proto as _proto
+    from ctm import device as _device
+    from ctm import keystore as _keystore
+    from ctm import wifi as _wifi
 except ImportError:  # run as a script: host/ctm/bridge.py
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from ctm import merge as _merge
     from ctm import proto as _proto
+    from ctm import device as _device
+    from ctm import keystore as _keystore
+    from ctm import wifi as _wifi
 
 SERIAL_NO = os.environ.get("CTM_USB_SERIAL", "5915018996")
 BAUD = 115200
 READ_TIMEOUT_S = 0.5      # serial read blocks at most this long -> no busy loop
 WRITE_TIMEOUT_S = 2.0
 POLL_S = 2.0              # sessions dir poll period
-MIN_INTERVAL_S = 2.0      # P1 (USB). ARCHITECTURE: 30s for WiFi (P4).
+MIN_INTERVAL_S = 2.0      # USB
+WIFI_MIN_INTERVAL_S = 30.0  # PROTOCOL §4.2
+WIFI_TICK_S = 1.0         # WiFi loop period (also USB presence re-check period)
+WIFI_BACKOFF_BASE_S = 5.0
+WIFI_BACKOFF_MAX_S = 600.0
+KEY_RETRY_S = 60.0        # re-ask the Keychain this often when the key is missing
+SEQ_MAX = 0xFFFFFFFF
+TRANSPORTS = ("auto", "usb", "wifi")
 NAK_RETRY_S = 1.0
 HEARTBEAT_S = 120.0
 PRUNE_EVERY_S = 3600.0
@@ -78,6 +96,11 @@ def open_port(dev):
     return s
 
 
+def next_seq(last_seq, now):
+    """PROTOCOL §3: seq never decreases across bridge restarts."""
+    return min(SEQ_MAX, max(int(last_seq) + 1, int(now)))
+
+
 def windows_key(windows):
     """What counts as a change: pct / resets_at per window, presence."""
     return tuple(sorted((k, w.get("pct"), w.get("resets_at")) for k, w in windows.items()))
@@ -85,7 +108,11 @@ def windows_key(windows):
 
 class Bridge(object):
     def __init__(self, home=None, find_port=find_port, open_port=open_port,
-                 clock=time.time, sleep=time.sleep, min_interval=MIN_INTERVAL_S):
+                 clock=time.time, sleep=time.sleep, min_interval=MIN_INTERVAL_S,
+                 transport="auto", keystore=None, wifi_factory=None,
+                 wifi_min_interval=WIFI_MIN_INTERVAL_S):
+        if transport not in TRANSPORTS:
+            raise ValueError("transport must be one of %s" % (TRANSPORTS,))
         self.home = home or ctm_home()
         self.serial_dir = os.path.join(self.home, "serial")
         self.state_path = os.path.join(self.serial_dir, "hold.state")
@@ -95,6 +122,17 @@ class Bridge(object):
         self.clock = clock
         self.sleep = sleep
         self.min_interval = min_interval
+        self.wifi_min_interval = wifi_min_interval
+        self.transport = transport
+        self.keystore = keystore
+        self.wifi_factory = wifi_factory or (
+            lambda host, key, ip: _wifi.WifiClient(host, key, ip))
+        self.active = None          # "usb" | "wifi" | None
+        self.wifi = None            # WifiClient for the paired device
+        self.pair_id = None         # (host, paired_at) the client was built for
+        self.key_retry_at = None
+        self.wifi_next_try = None
+        self.backoff = _wifi.Backoff(WIFI_BACKOFF_BASE_S, WIFI_BACKOFF_MAX_S)
         self.port = None
         self.dev = None
         self.buf = b""
@@ -153,7 +191,7 @@ class Bridge(object):
         self.windows = _merge.merge(self.sessions, now)
 
     def current_frame(self, now):
-        return _proto.build_frame(self.seq + 1, now, self.windows)
+        return _proto.build_frame(next_seq(self.seq, now), now, self.windows)
 
     def due(self, now):
         """Should a frame be sent now? Returns reason string or None."""
@@ -164,11 +202,20 @@ class Bridge(object):
         if self.last_sent_at is None:
             return "first"
         elapsed = now - self.last_sent_at
-        if windows_key(self.windows) != self.last_sent_key and elapsed >= self.min_interval:
+        mi = self.wifi_min_interval if self.active == "wifi" else self.min_interval
+        if windows_key(self.windows) != self.last_sent_key and elapsed >= mi:
             return "change"
         if elapsed >= HEARTBEAT_S:
             return "heartbeat"
         return None
+
+    def mark_sent(self, frame, now, reason):
+        self.seq = frame["seq"]
+        self.last_sent_at = now
+        self.last_sent_key = windows_key(self.windows)
+        self.force_send = False
+        self.retry_at = None
+        self.last_reason = reason
 
     def send(self, now, reason):
         frame = self.current_frame(now)
@@ -180,12 +227,7 @@ class Bridge(object):
             self.port.flush()
         except Exception:
             pass
-        self.seq = frame["seq"]
-        self.last_sent_at = now
-        self.last_sent_key = windows_key(self.windows)
-        self.force_send = False
-        self.retry_at = None
-        self.last_reason = reason
+        self.mark_sent(frame, now, reason)
         self.log(">> " + data.decode("utf-8").rstrip("\n") + "  (" + reason + ")")
 
     # ---- device lines ----
@@ -242,14 +284,26 @@ class Bridge(object):
             self.sleep(PAUSED_SLEEP_S)
             return
         if self.port is None:
+            if self.transport == "wifi":
+                self.wifi_step()
+                return
             try:
                 dev = self.find_port()
             except Exception as e:
+                if self.transport == "auto" and self.wifi_ready():
+                    self.wifi_step()
+                    return
                 self.set_state("WAITING (port scan failed: %s)" % e)
                 self.sleep(ABSENT_RETRY_S)
                 return
             if not dev:
-                self.set_state("WAITING (device not present)")
+                if self.transport == "auto" and self.wifi_ready():
+                    self.wifi_step()
+                    return
+                if self.transport == "usb":
+                    self.set_state("WAITING (device not present)")
+                else:
+                    self.wait_state_unpaired()
                 self.sleep(ABSENT_RETRY_S)
                 return
             try:
@@ -262,6 +316,10 @@ class Bridge(object):
             self.dev = dev
             self.buf = b""
             self.force_send = True
+            if self.active != "usb":
+                if self.active is not None:
+                    self.event("transport -> usb")
+                self.active = "usb"
             self.event("HELD %s" % dev)
             self.set_state("HELD %s" % dev)
         now = self.clock()
@@ -285,11 +343,142 @@ class Bridge(object):
         if chunk:
             self.feed(chunk)
 
+    # ---- WiFi transport (§4.2) ----
+    def _keystore(self):
+        if self.keystore is None:
+            self.keystore = _keystore.default()
+        return self.keystore
+
+    def wifi_ready(self):
+        """Load / refresh the pairing (device.json + Keychain key). True when a
+        WifiClient is available. Never logs the key."""
+        rec = _device.load(self.home)
+        if rec is None:
+            if self.wifi is not None:
+                self.event("device.json removed -> WiFi unpaired")
+            self.wifi = None
+            self.pair_id = None
+            return False
+        pid = (rec["host"], rec.get("paired_at"))
+        if self.wifi is not None and pid == self.pair_id:
+            if rec.get("ip") and not self.wifi.cached_ip:
+                self.wifi.cached_ip = rec.get("ip")
+            return True
+        now = self.clock()
+        if pid == self.pair_id and self.key_retry_at is not None and now < self.key_retry_at:
+            return False
+        self.pair_id = pid
+        self.wifi = None
+        try:
+            key_hex = self._keystore().get(rec["host"])
+        except Exception as e:
+            key_hex = None
+            self.event("keychain lookup failed for %s: %s" % (rec["host"], e))
+        if not key_hex:
+            self.key_retry_at = now + KEY_RETRY_S
+            self.set_state("WAITING (paired %s but no pairing key in Keychain -- rerun ctm setup)"
+                           % rec["host"])
+            return False
+        self.key_retry_at = None
+        self.wifi = self.wifi_factory(rec["host"], bytes.fromhex(key_hex), rec.get("ip") or None)
+        self.backoff.reset()
+        self.wifi_next_try = None
+        self.event("paired device %s (cached ip %s)" % (rec["host"], rec.get("ip") or "-"))
+        return True
+
+    def wait_state_unpaired(self):
+        if self._state is None or not self._state.startswith("WAITING (paired"):
+            self.set_state("WAITING (device not present, not paired for WiFi)")
+
+    def wifi_step(self):
+        """One WiFi iteration. Blocks at most ~HTTP timeout + resolve timeout
+        when sending, otherwise sleeps WIFI_TICK_S."""
+        if not self.wifi_ready():
+            self.wait_state_unpaired()
+            self.sleep(ABSENT_RETRY_S)
+            return
+        if self.active != "wifi":
+            self.event("transport -> wifi (%s)" % self.wifi.host)
+            self.active = "wifi"
+            self.force_send = True
+            self.set_state("WIFI %s" % self.wifi.host)
+        now = self.clock()
+        self.poll_sessions(now)
+        if self.wifi_next_try is not None and now < self.wifi_next_try:
+            self.sleep(min(WIFI_TICK_S, self.wifi_next_try - now))
+            return
+        reason = self.due(now)
+        if reason:
+            self.wifi_send(now, reason)
+        self.sleep(WIFI_TICK_S)
+
+    def wifi_fail(self, now, msg):
+        d = self.backoff.fail()
+        self.wifi_next_try = now + d
+        self.event("%s -> retry in %ds" % (msg, d))
+        self.set_state("WIFI %s backoff %ds (%s)" % (self.wifi.host, d, msg))
+
+    def wifi_send(self, now, reason):
+        frame = self.current_frame(now)
+        # §4.2 body: the encoded frame, without the USB-only leading "\n"
+        body = _proto.encode_frame(frame)
+        self.log(">> wifi " + body.decode("utf-8").rstrip("\n") + "  (" + reason + ")")
+        # the seq is spent whether or not the device saw it
+        self.seq = frame["seq"]
+        r = self.wifi.post_state(body)
+        host = self.wifi.host
+        if r.kind == "ack":
+            self.mark_sent(frame, now, reason)
+            self.backoff.reset()
+            self.wifi_next_try = None
+            if r.reply and r.reply.get("seq") not in (None, frame["seq"]):
+                self.event("ack for seq=%s (last sent %s)" % (r.reply.get("seq"), frame["seq"]))
+            if r.ip and r.ip != self.wifi.cached_ip:
+                self.wifi.cached_ip = r.ip
+                if _device.update_ip(self.home, r.ip):
+                    self.event("cached ip for %s -> %s" % (host, r.ip))
+            self.set_state("WIFI %s %s ok seq=%d" % (host, r.ip or "-", frame["seq"]))
+            return
+        if r.kind == "nak_parse":
+            # delivered but rejected: do not hammer, normal policy resends later
+            self.event("HTTP 400 NAK seq=%s err=%s" % (frame["seq"], r.err))
+            self.mark_sent(frame, now, reason)
+            return
+        if r.kind == "old_seq":
+            self.event("HTTP 409 NAK seq=%s err=old_seq" % frame["seq"])
+            self.mark_sent(frame, now, reason)
+            # resync with the device's last_seq, then retry once (never retry a retry)
+            info, _ip, _err = self.wifi.get_info()
+            ls = info.get("last_seq") if isinstance(info, dict) else None
+            if isinstance(ls, int) and not isinstance(ls, bool) and ls >= self.seq:
+                self.event("device last_seq=%d -> skipping ahead" % ls)
+                self.seq = min(SEQ_MAX, ls)
+            if reason != "retry":
+                self.retry_at = now + NAK_RETRY_S
+            return
+        if r.kind == "skew":
+            self.wifi_fail(now, "HTTP 409 skew: Mac clock and device clock differ by >300s")
+            return
+        if r.kind == "sig":
+            self.wifi_fail(now, "HTTP 401: pairing key mismatch \u2014 rerun ctm setup")
+            return
+        if r.kind == "net":
+            msg = "POST %s (%s) failed: %s" % (host, r.ip, r.err)
+            if r.errno == errno.EHOSTUNREACH:
+                self.event(_wifi.LOCAL_NETWORK_HINT)
+            self.wifi_fail(now, msg)
+            return
+        if r.kind == "resolve":
+            self.wifi_fail(now, r.err)
+            return
+        self.wifi_fail(now, "HTTP %s from %s" % (r.status, host))
+
     def run(self):
         os.makedirs(self.serial_dir, exist_ok=True)
         with open(self.pid_path, "w") as f:
             f.write(str(os.getpid()))
-        self.event("start pid=%d serial_no=%s home=%s" % (os.getpid(), SERIAL_NO, self.home))
+        self.event("start pid=%d serial_no=%s home=%s transport=%s"
+                   % (os.getpid(), SERIAL_NO, self.home, self.transport))
         try:
             while not self.stop:
                 self.step()
@@ -327,8 +516,10 @@ def main(argv=None):
                     help="merge sessions, print the frame that would be sent, exit (no serial)")
     ap.add_argument("--force", action="store_true",
                     help="start even if hold.pid names another live process")
+    ap.add_argument("--transport", choices=TRANSPORTS, default="auto",
+                    help="auto: USB if the target device is plugged in, else WiFi if paired")
     args = ap.parse_args(argv)
-    b = Bridge()
+    b = Bridge(transport=args.transport)
     if args.once:
         now = time.time()
         b.poll_sessions(now, force=True)

@@ -27,3 +27,14 @@ def rd(p):
 def wr(p, s):
     with open(p, "w") as f:
         f.write(s)
+
+
+# Guard: no test may reach the real macOS Keychain (`security` CLI).
+from ctm import keystore as _keystore  # noqa: E402
+
+
+def _no_real_keychain(*_a, **_k):
+    raise AssertionError("tests must not use the real Keychain; inject keystore.MemoryKeystore")
+
+
+_keystore.default = _no_real_keychain

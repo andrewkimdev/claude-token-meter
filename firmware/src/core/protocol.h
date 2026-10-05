@@ -7,7 +7,7 @@
 namespace ctm {
 
 constexpr int PROTOCOL_VERSION = 1;
-constexpr const char *FW_VERSION = "0.1.0";
+constexpr const char *FW_VERSION = "0.2.0";
 constexpr const char *BOARD = "t-display";
 constexpr size_t MAX_LINE = 1024;   // §4.1
 

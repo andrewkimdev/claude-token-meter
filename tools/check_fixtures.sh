@@ -21,9 +21,11 @@ done
 n_frame=$(find "$ROOT/fixtures" -maxdepth 1 -type f -name 'frame_*.json' | wc -l | tr -d ' ')
 n_merge=$(find "$ROOT/fixtures" -maxdepth 1 -type f -name 'merge_*.json' | wc -l | tr -d ' ')
 [ "$n_frame" -gt 0 ] || fail "no fixtures/frame_*.json"
+n_hmac=$(find "$ROOT/fixtures" -maxdepth 1 -type f -name 'hmac_*.json' | wc -l | tr -d ' ')
 [ "$n_merge" -gt 0 ] || fail "no fixtures/merge_*.json"
+[ "$n_hmac" -ge 4 ] || fail "need >=4 fixtures/hmac_*.json (PROTOCOL 4.4), found $n_hmac"
 grep -q '^\[env:native\]' "$ROOT/firmware/platformio.ini" || fail "[env:native] missing in platformio.ini"
-echo "fixtures: $n_frame frame, $n_merge merge"
+echo "fixtures: $n_frame frame, $n_merge merge, $n_hmac hmac"
 
 # --- step 1: host -------------------------------------------------------------
 echo "== host unittest"
@@ -37,7 +39,9 @@ trap 'rm -f "$log"' EXIT
 # Require that every frame fixture actually ran and passed (no silent skips).
 n_pass=$(grep -c 'frame_.*\.json.*\[PASSED\]' "$log" || true)
 [ "$n_pass" = "$n_frame" ] || fail "native ran $n_pass/$n_frame frame fixtures"
+n_hpass=$(grep -c 'hmac_.*\.json.*\[PASSED\]' "$log" || true)
+[ "$n_hpass" = "$n_hmac" ] || fail "native ran $n_hpass/$n_hmac hmac fixtures"
 grep -q 'test cases: .* succeeded' "$log" || fail "native summary not found"
 if grep -Eq '\[FAILED\]|[0-9]+ failed' "$log"; then fail "native reported failures"; fi
 
-echo "OK: host and firmware agree on $n_frame frame fixtures"
+echo "OK: host and firmware agree on $n_frame frame fixtures; firmware verified $n_hmac hmac fixtures"

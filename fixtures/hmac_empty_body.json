@@ -1,0 +1,7 @@
+{
+  "description": "empty body with its correct sig: the signature layer accepts (parse rejects later)",
+  "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "body": "",
+  "sig": "d38b42096d80f45f826b44a9d5607de72496a415d3f4a1a8c88e3bb9da8dc1cb",
+  "expected": "ok"
+}

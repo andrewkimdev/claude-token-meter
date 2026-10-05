@@ -117,8 +117,9 @@ void drawSevenDay(const WindowView &v) {
 
 void drawFooter(const RenderModel &m) {
   // Dot: green <=150s since last frame, grey <=300s, red + "host offline" after.
+  // Label: transport that delivered the last accepted frame (P4).
   uint16_t dot = C_GREEN, txt = C_TEXT;
-  const char *label = "USB";
+  const char *label = m.viaWifi ? "WiFi" : "USB";
   if (m.link == LinkState::Stale) {
     dot = C_DIM; txt = C_DIM;
   } else if (m.link == LinkState::Offline) {
@@ -167,31 +168,40 @@ void resetRow(int row, const char *label, const Window &w, int64_t now) {
   }
 }
 
+// Rows (P4): data age and last seq were dropped for the WiFi rows; data age
+// is on the main footer and last_seq is in USB/HTTP info.
 void drawDetail(const RenderModel &m) {
   char buf[40], a[16];
   resetRow(0, "5H reset", m.frame.five_hour, m.now);
   resetRow(1, "7D reset", m.frame.seven_day, m.now);
 
-  int64_t obs = latestObserved(m.frame);
-  detailRow(2, "data age", obs > 0 ? formatAge(m.now - obs, a, sizeof a) : "no data",
-            C_TEXT);
-
-  snprintf(buf, sizeof buf, "%lu", (unsigned long)m.lastSeq);
-  detailRow(3, "last seq", buf, C_TEXT);
-
+  const char *via = m.viaWifi ? "WiFi" : "USB";
   uint16_t lc = m.link == LinkState::Fresh ? C_GREEN
               : m.link == LinkState::Stale ? C_DIM : C_RED;
   if (m.haveFrame) {
-    snprintf(buf, sizeof buf, "USB, frame %s", formatAge(m.frameAgeS, a, sizeof a));
-    detailRow(4, "link", buf, lc);
+    snprintf(buf, sizeof buf, "%s, frame %s", via, formatAge(m.frameAgeS, a, sizeof a));
+    detailRow(2, "link", buf, lc);
   } else {
-    detailRow(4, "link", "USB, no frame yet", C_DIM);
+    detailRow(2, "link", "no frame yet", C_DIM);
   }
 
-  detailRow(5, "uptime", formatCountdown(m.uptimeS, a, sizeof a), C_TEXT);
+  if (m.wifi == WifiState::Connected) {
+    snprintf(buf, sizeof buf, "connected, %d dBm", m.rssi);
+    detailRow(3, "wifi", buf, C_GREEN);
+  } else if (m.wifi == WifiState::Connecting) {
+    detailRow(3, "wifi", "connecting...", C_AMBER);
+  } else {
+    detailRow(3, "wifi", m.provisioned ? "off" : "off (run ctm setup)", C_DIM);
+  }
 
-  snprintf(buf, sizeof buf, "%lu B", (unsigned long)m.freeHeap);
-  detailRow(6, "free heap", buf, C_TEXT);
+  detailRow(4, "ip", m.ip[0] ? m.ip : "--", m.ip[0] ? C_TEXT : C_DIM);
+
+  snprintf(buf, sizeof buf, "%s.local", m.host);
+  detailRow(5, "host", buf, m.provisioned ? C_TEXT : C_DIM);
+
+  snprintf(buf, sizeof buf, "%s / %lu B", formatCountdown(m.uptimeS, a, sizeof a),
+           (unsigned long)m.freeHeap);
+  detailRow(6, "up / heap", buf, C_TEXT);
 
   snprintf(buf, sizeof buf, "fw %s  KST", FW_VERSION);
   int y = DET_Y0 + 7 * DET_DY;
@@ -213,13 +223,30 @@ void drawToast(const char *msg) {
   spr.setTextDatum(TL_DATUM);
 }
 
-void drawWaiting() {
+void drawWaiting(const RenderModel &m) {
   spr.setTextDatum(MC_DATUM);
   spr.setTextColor(C_TEXT);
-  spr.drawString("Claude Token Meter", SCR_W / 2, 34, 4);
+  spr.drawString("Claude Token Meter", SCR_W / 2, 30, 4);
   spr.setTextColor(C_DIM);
-  spr.drawString("waiting for host...", SCR_W / 2, 72, 2);
-  spr.drawString("USB serial 115200", SCR_W / 2, 92, 2);
+  spr.drawString("waiting for host...", SCR_W / 2, 62, 2);
+  if (!m.provisioned) {
+    spr.drawString("USB serial 115200", SCR_W / 2, 80, 2);
+    spr.setTextColor(C_TEXT);
+    spr.drawString("USB: run ctm setup", SCR_W / 2, 98, 2);
+  } else {
+    char buf[40];
+    snprintf(buf, sizeof buf, "WiFi: %s.local", m.host);
+    spr.drawString(buf, SCR_W / 2, 80, 2);
+    if (m.wifi == WifiState::Connected) {
+      snprintf(buf, sizeof buf, "connected %s", m.ip);
+      spr.setTextColor(C_GREEN);
+      spr.drawString(buf, SCR_W / 2, 98, 2);
+    } else {
+      spr.setTextColor(C_AMBER);
+      spr.drawString("connecting...", SCR_W / 2, 98, 2);
+    }
+  }
+  spr.setTextColor(C_DIM);
   char fw[24];
   snprintf(fw, sizeof fw, "fw %s", FW_VERSION);
   spr.drawString(fw, SCR_W / 2, 124, 1);
@@ -234,7 +261,7 @@ void render(const RenderModel &m) {
   if (m.view == View::Detail) {
     drawDetail(m);
   } else if (!m.haveFrame) {
-    drawWaiting();
+    drawWaiting(m);
   } else {
     drawFiveHour(makeView(m.frame.five_hour, m.now, FIVE_HOUR_S));
     drawSevenDay(makeView(m.frame.seven_day, m.now, SEVEN_DAY_S));

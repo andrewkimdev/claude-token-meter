@@ -8,7 +8,7 @@ from contextlib import redirect_stdout
 from unittest import mock
 
 from tests._util import rd
-from ctm import bridge, proto
+from ctm import bridge, keystore, proto
 
 
 class Clock(object):
@@ -69,6 +69,18 @@ def write_session(home, sid, pct5, r5, obs, pct7=None, r7=None):
     os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 1000 + int(obs * 1000) % 1000000))
 
 
+S0 = 1791180000  # int(Clock().t): first seq = max(0 + 1, int(now))
+
+
+def check_seqs(tc, frames, n):
+    """PROTOCOL §3 seq rule: seq = max(last_seq + 1, int(now)), sent_at = int(now)."""
+    tc.assertEqual(len(frames), n)
+    last = 0
+    for f in frames:
+        tc.assertEqual(f["seq"], max(last + 1, f["sent_at"]))
+        last = f["seq"]
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -89,7 +101,8 @@ class Base(unittest.TestCase):
             return p
 
         self.b = bridge.Bridge(home=self.home, find_port=find, open_port=opener,
-                               clock=self.clock, sleep=self.clock.sleep)
+                               clock=self.clock, sleep=self.clock.sleep,
+                               keystore=keystore.MemoryKeystore())
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -126,17 +139,18 @@ class SendPolicy(Base):
         self.run_for(1)
         fr = self.all_frames()
         self.assertEqual(len(fr), 1)
-        self.assertEqual(fr[0]["seq"], 1)
+        self.assertEqual(fr[0]["seq"], S0)
         self.assertEqual(fr[0]["windows"]["five_hour"]["pct"], 52)
         self.assertEqual(proto.device_accept(json.dumps(fr[0]), None)["result"], "ack")
         self.run_for(118)
         self.assertEqual(len(self.all_frames()), 1)
         self.run_for(3)
         fr = self.all_frames()
-        self.assertEqual([f["seq"] for f in fr], [1, 2])
+        check_seqs(self, fr, 2)
+        self.assertGreaterEqual(fr[1]["seq"], S0 + 119)
         self.assertIn("HELD /dev/cu.fake", self.state())
         log = self.logtext()
-        self.assertIn('>> {"t":"state","v":1,"seq":1', log)
+        self.assertIn('>> {"t":"state","v":1,"seq":%d' % S0, log)
         self.assertIn("(heartbeat)", log)
 
     def test_change_triggers_send_with_min_interval(self):
@@ -190,7 +204,8 @@ class SendPolicy(Base):
         p.rx.append(b'lo","fw":"0.1.0","board":"t-display"}\r\n')
         self.run_for(0.6)
         fr = self.all_frames()
-        self.assertEqual([f["seq"] for f in fr], [1, 2])
+        check_seqs(self, fr, 2)
+        self.assertEqual(fr[1]["seq"], S0 + 1)   # same second -> last + 1
         log = self.logtext()
         self.assertIn("[diag] boot", log)
         self.assertIn('@{"t":"hello"', log)
@@ -198,11 +213,12 @@ class SendPolicy(Base):
 
     def test_ack_nak_logged(self):
         self.run_for(1)
-        self.ports[0].rx.append(b'@{"t":"ack","seq":1}\n@{"t":"nak","seq":1,"err":"old_seq"}\n')
+        self.ports[0].rx.append(('@{"t":"ack","seq":%d}\n@{"t":"nak","seq":%d,"err":"old_seq"}\n'
+                                 % (S0, S0)).encode())
         self.run_for(1)
         log = self.logtext()
-        self.assertIn('@{"t":"ack","seq":1}', log)
-        self.assertIn("[bridge] NAK seq=1 err=old_seq", log)
+        self.assertIn('@{"t":"ack","seq":%d}' % S0, log)
+        self.assertIn("[bridge] NAK seq=%d err=old_seq" % S0, log)
         self.assertNotIn("ack for seq", log)
 
 
@@ -218,10 +234,10 @@ class SendPolicy(Base):
         p = self.ports[0]
         p.rx.append(b'@{"t":"nak","seq":0,"err":"parse"}\n')
         self.run_for(2)
-        self.assertEqual([f["seq"] for f in self.all_frames()], [1, 2])
+        check_seqs(self, self.all_frames(), 2)
         p.rx.append(b'@{"t":"nak","seq":0,"err":"parse"}\n')   # nak of the retry
         self.run_for(5)
-        self.assertEqual([f["seq"] for f in self.all_frames()], [1, 2])  # no retry loop
+        check_seqs(self, self.all_frames(), 2)  # no retry loop
 
     def test_old_seq_nak_no_retry(self):
         self.run_for(1)
@@ -255,7 +271,7 @@ class PortLifecycle(Base):
         self.run_for(3)
         self.assertTrue(self.ports[0].closed)
         self.assertEqual(len(self.ports), 2)
-        self.assertEqual([f["seq"] for f in self.all_frames()], [1, 2])
+        check_seqs(self, self.all_frames(), 2)
         self.assertIn("[bridge] read error", self.logtext())
 
     def test_write_error_reopens(self):
@@ -309,7 +325,7 @@ class Once(unittest.TestCase):
                     redirect_stdout(out):
                 self.assertEqual(bridge.main(["--once"]), 0)
             f = json.loads(out.getvalue())
-            self.assertEqual(f["seq"], 1)
+            self.assertEqual(f["seq"], f["sent_at"])  # max(0 + 1, int(now))
             self.assertEqual(f["windows"]["five_hour"]["pct"], 42)
             self.assertFalse(os.path.exists(os.path.join(home, "serial", "hold.pid")))
 

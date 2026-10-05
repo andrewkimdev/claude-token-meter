@@ -1,0 +1,7 @@
+{
+  "description": "correct MAC but uppercase hex: PROTOCOL 4.2 requires lowercase",
+  "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "body": "{\"t\":\"state\",\"v\":1,\"seq\":1791180017,\"sent_at\":1791180000,\"windows\":{\"five_hour\":{\"pct\":52,\"resets_at\":1791186600,\"observed_at\":1791179913},\"seven_day\":{\"pct\":29,\"resets_at\":1791511200,\"observed_at\":1791179913}}}",
+  "sig": "15E18EE3536F9B474FBD9D13C68F819170A0F8920D1CD7DD82E4C3E548DD861C",
+  "expected": "sig"
+}

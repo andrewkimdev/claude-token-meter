@@ -14,8 +14,9 @@ RGB565 -> RGB888 is a plain bit expansion (panel gamma not modelled).
 Needs Pillow. The PlatformIO venv has it:
   ~/.platformio/penv/bin/python3 tools/preview.py --samples
   ~/.platformio/penv/bin/python3 tools/preview.py frame.json --now 1791180000 -o out.png
-  ... --view detail --frame-age 200 --uptime 3600 --heap 150000 --toast "setup: P4"
+  ... --view detail --frame-age 200 --uptime 3600 --heap 150000 --toast "run ctm setup"
   ... (no frame argument) -> waiting screen
+  ... --via wifi --provisioned --wifi connected --ip 192.168.1.23 --rssi -61
 """
 from __future__ import annotations
 
@@ -37,7 +38,7 @@ ROOT = Path(__file__).resolve().parent.parent
 FONT_DIR = ROOT / "firmware/.pio/libdeps/t-display/TFT_eSPI/Fonts"
 OUT_DIR = ROOT / "tools/preview_out"
 
-FW_VERSION = "0.1.0"          # core/protocol.h
+FW_VERSION = "0.2.0"          # core/protocol.h
 TZ_OFFSET_S = 9 * 3600        # firmware: setenv("TZ","KST-9") == UTC+9
 
 # ---------------------------------------------------------------- fonts ----
@@ -338,6 +339,13 @@ class Model:
     uptime: int = 0
     free_heap: int = 0
     toast: str | None = None
+    # P4
+    via_wifi: bool = False          # transport of the last accepted frame
+    provisioned: bool = False
+    wifi: str = "off"               # off | connecting | connected
+    host: str = "ctmeter-a1b2"
+    ip: str = ""                    # "" unless connected
+    rssi: int = 0
 
 
 def level_color(l):
@@ -403,7 +411,7 @@ def draw_seven_day(s: Sprite, v: View):
 
 def draw_footer(s: Sprite, m: Model):
     link = link_state(m.frame_age)
-    dot, txt, label = C_GREEN, C_TEXT, "USB"
+    dot, txt, label = C_GREEN, C_TEXT, "WiFi" if m.via_wifi else "USB"
     if link == "stale":
         dot = txt = C_DIM
     elif link == "offline":
@@ -438,17 +446,22 @@ def reset_row(s: Sprite, row, label, w: Window, now):
 def draw_detail(s: Sprite, m: Model):
     reset_row(s, 0, "5H reset", m.frame.five_hour, m.now)
     reset_row(s, 1, "7D reset", m.frame.seven_day, m.now)
-    obs = latest_observed(m.frame)
-    detail_row(s, 2, "data age", fmt_age(m.now - obs) if obs > 0 else "no data", C_TEXT)
-    detail_row(s, 3, "last seq", str(m.last_seq), C_TEXT)
+    via = "WiFi" if m.via_wifi else "USB"
     link = link_state(m.frame_age)
     lc = {"fresh": C_GREEN, "stale": C_DIM}.get(link, C_RED)
     if m.have_frame:
-        detail_row(s, 4, "link", f"USB, frame {fmt_age(m.frame_age)}", lc)
+        detail_row(s, 2, "link", f"{via}, frame {fmt_age(m.frame_age)}", lc)
     else:
-        detail_row(s, 4, "link", "USB, no frame yet", C_DIM)
-    detail_row(s, 5, "uptime", fmt_countdown(m.uptime), C_TEXT)
-    detail_row(s, 6, "free heap", f"{m.free_heap} B", C_TEXT)
+        detail_row(s, 2, "link", "no frame yet", C_DIM)
+    if m.wifi == "connected":
+        detail_row(s, 3, "wifi", f"connected, {m.rssi} dBm", C_GREEN)
+    elif m.wifi == "connecting":
+        detail_row(s, 3, "wifi", "connecting...", C_AMBER)
+    else:
+        detail_row(s, 3, "wifi", "off" if m.provisioned else "off (run ctm setup)", C_DIM)
+    detail_row(s, 4, "ip", m.ip or "--", C_TEXT if m.ip else C_DIM)
+    detail_row(s, 5, "host", f"{m.host}.local", C_TEXT if m.provisioned else C_DIM)
+    detail_row(s, 6, "up / heap", f"{fmt_countdown(m.uptime)} / {m.free_heap} B", C_TEXT)
     y = DET_Y0 + 7 * DET_DY
     s.color = C_DIM
     s.draw_string(f"fw {FW_VERSION}  KST", PAD, y, 2)
@@ -467,12 +480,24 @@ def draw_toast(s: Sprite, msg):
     s.datum = TL
 
 
-def draw_waiting(s: Sprite):
+def draw_waiting(s: Sprite, m: Model):
     s.datum, s.color = MC, C_TEXT
-    s.draw_string("Claude Token Meter", W // 2, 34, 4)
+    s.draw_string("Claude Token Meter", W // 2, 30, 4)
     s.color = C_DIM
-    s.draw_string("waiting for host...", W // 2, 72, 2)
-    s.draw_string("USB serial 115200", W // 2, 92, 2)
+    s.draw_string("waiting for host...", W // 2, 62, 2)
+    if not m.provisioned:
+        s.draw_string("USB serial 115200", W // 2, 80, 2)
+        s.color = C_TEXT
+        s.draw_string("USB: run ctm setup", W // 2, 98, 2)
+    else:
+        s.draw_string(f"WiFi: {m.host}.local", W // 2, 80, 2)
+        if m.wifi == "connected":
+            s.color = C_GREEN
+            s.draw_string(f"connected {m.ip}", W // 2, 98, 2)
+        else:
+            s.color = C_AMBER
+            s.draw_string("connecting...", W // 2, 98, 2)
+    s.color = C_DIM
     s.draw_string(f"fw {FW_VERSION}", W // 2, 124, 1)
     s.datum = TL
 
@@ -482,7 +507,7 @@ def render(m: Model) -> Image.Image:
     if m.view == "detail":
         draw_detail(s, m)
     elif not m.have_frame:
-        draw_waiting(s)
+        draw_waiting(s, m)
     else:
         draw_five_hour(s, make_view(m.frame.five_hour, m.now, FIVE_HOUR_S))
         draw_seven_day(s, make_view(m.frame.seven_day, m.now, SEVEN_DAY_S))
@@ -517,6 +542,7 @@ def samples(scale: int):
     now = 1791180000
     h, d = 3600, 86400
     std = dict(uptime=2 * d + 5 * h + 17 * 60, free_heap=154_320)
+    wifi_ok = dict(provisioned=True, wifi="connected", ip="192.168.1.23", rssi=-61)
 
     def mdl(fd, **kw):
         f = parse_frame(fd)
@@ -535,13 +561,21 @@ def samples(scale: int):
                              frame_age=200),
         "offline_red":   mdl(frame_dict(now, 48, win(30, 3 * h, now, 52 * 60), win(20, 4 * d, now, 52 * 60)),
                              frame_age=9 * 60),
-        "waiting":       Model(now=now, **std),
+        "waiting":       Model(now=now, **std),   # unprovisioned
+        "waiting_wifi_connecting": Model(now=now, provisioned=True, wifi="connecting", **std),
+        "waiting_wifi_connected":  Model(now=now, **wifi_ok, **std),
+        "wifi_footer":   mdl(frame_dict(now, 52, win(30, 3 * h, now, 40), win(20, 4 * d, now, 40)),
+                             via_wifi=True, **wifi_ok),
+        "wifi_stale":    mdl(frame_dict(now, 53, win(30, 3 * h, now, 25 * 60), win(20, 4 * d, now, 25 * 60)),
+                             frame_age=200, via_wifi=True, **wifi_ok),
         "detail":        mdl(frame_dict(now, 49, win(62, 3 * h, now, 40), win(55, 4 * d, now, 40)),
-                             view="detail", frame_age=34),
+                             view="detail", frame_age=34, via_wifi=True, **wifi_ok),
+        "detail_unprovisioned": mdl(frame_dict(now, 54, win(62, 3 * h, now, 40), win(55, 4 * d, now, 40)),
+                                    view="detail", frame_age=12),
         "detail_5h_passed": mdl(frame_dict(now, 50, win(71, -10 * 60, now, 2 * h), win(33, 4 * d, now, 2 * h)),
-                                view="detail", frame_age=200),
+                                view="detail", frame_age=200, provisioned=True, wifi="connecting"),
         "toast_setup":   mdl(frame_dict(now, 51, win(30, 3 * h, now, 40), win(20, 4 * d, now, 40)),
-                             toast="setup: P4"),
+                             toast="run ctm setup"),
     }
     for name, m in cases.items():
         save(render(m), OUT_DIR / f"{name}.png", scale)
@@ -556,6 +590,12 @@ def main():
     ap.add_argument("--uptime", type=int, default=3600)
     ap.add_argument("--heap", type=int, default=150000)
     ap.add_argument("--toast")
+    ap.add_argument("--via", choices=["usb", "wifi"], default="usb", help="transport of last frame (footer)")
+    ap.add_argument("--provisioned", action="store_true")
+    ap.add_argument("--wifi", choices=["off", "connecting", "connected"], default="off")
+    ap.add_argument("--host", default="ctmeter-a1b2")
+    ap.add_argument("--ip", default="")
+    ap.add_argument("--rssi", type=int, default=0)
     ap.add_argument("--scale", type=int, default=3, help="nearest-neighbour upscale (1 = native)")
     ap.add_argument("-o", "--out", type=Path, default=OUT_DIR / "preview.png")
     ap.add_argument("--samples", action="store_true", help=f"write sample set to {OUT_DIR}")
@@ -564,7 +604,9 @@ def main():
     load_fonts()
     if a.samples:
         return samples(a.scale)
-    m = Model(view=a.view, frame_age=a.frame_age, uptime=a.uptime, free_heap=a.heap, toast=a.toast)
+    m = Model(view=a.view, frame_age=a.frame_age, uptime=a.uptime, free_heap=a.heap, toast=a.toast,
+              via_wifi=a.via == "wifi", provisioned=a.provisioned, wifi=a.wifi, host=a.host,
+              ip=a.ip if a.wifi == "connected" else "", rssi=a.rssi if a.wifi == "connected" else 0)
     if a.frame:
         d = json.loads(Path(a.frame).read_text())
         if "line" in d:   # fixtures/frame_*.json wrap the raw frame line

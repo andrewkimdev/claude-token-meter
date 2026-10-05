@@ -15,6 +15,13 @@ struct RenderModel {
   int64_t          uptimeS = 0;
   uint32_t         freeHeap = 0;
   const char      *toast = nullptr;     // transient centered message, or nullptr
+  // P4 transport / WiFi
+  bool             viaWifi = false;     // transport of the last accepted frame (footer "USB"/"WiFi")
+  bool             provisioned = false; // NVS has ssid+key
+  ctm::WifiState   wifi = ctm::WifiState::Off;
+  const char      *host = "";           // "ctmeter-xxxx"
+  char             ip[16] = {0};        // "" unless connected
+  int              rssi = 0;            // dBm, 0 unless connected
 };
 
 // Draws into the sprite and pushes it. Main task only (gotcha 3.16).
