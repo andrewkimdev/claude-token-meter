@@ -1,0 +1,5 @@
+.DS_Store
+.pio/
+__pycache__/
+*.pyc
+firmware/src/config/secrets.h
