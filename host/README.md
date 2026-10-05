@@ -1,4 +1,4 @@
-# host — ctm (P4: USB serial + WiFi)
+# host — ctm (P4: USB serial + WiFi, P5 robustness, P6 install)
 
 Implements `docs/PROTOCOL.md` v1. Files are under `~/.claude-token-meter/` (override with `CTM_HOME`).
 
@@ -12,7 +12,9 @@ Implements `docs/PROTOCOL.md` v1. Files are under `~/.claude-token-meter/` (over
 | `ctm/device.py` | `device.json` (host, last IP, paired_at; never the key) |
 | `ctm/keystore.py` | Pairing key in the macOS Keychain via `security` (service `ctm-pairing`, account = host) |
 | `ctm/pairing.py` | `setup`, `unpair`, `info` over USB (§4.3) |
-| `ctm/cli.py` | `status`, `push-test`, `setup`, `unpair`, `info` |
+| `ctm/install.py` | `install` / `uninstall`: LaunchAgent `com.ctm.bridge` + statusLine in `~/.claude/settings.json` |
+| `ctm/doctor.py` | `doctor`: PASS/FAIL/SKIP health report, verdict only if every check ran |
+| `ctm/cli.py` | `status`, `push-test`, `setup`, `unpair`, `info`, `doctor`, `install`, `uninstall` |
 
 ## Register the statusLine
 
@@ -70,6 +72,26 @@ kill -USR1 $(cat ~/.claude-token-meter/serial/hold.pid) # release port (upload),
 - Transport `auto` (default): USB while the target USB device is present (held exactly as above), otherwise WiFi if paired (`device.json` + Keychain key), otherwise wait. `usb` / `wifi` force one.
 - WiFi: `POST http://<host>.local/v1/state` (getaddrinfo, falling back to the cached IP; the IP cache is updated on success) with `X-CTM-Sig: hmac_sha256(key, body)`. Change sends at most every 30s, heartbeat 120s, 3s timeouts, exponential backoff 5s → 10 min on failure. 401 logs "pairing key mismatch — rerun ctm setup"; 409 `old_seq` resyncs from `/v1/info` and retries once; 409 `skew` means the Mac clock is off; EHOSTUNREACH logs a macOS Local Network permission hint. `hold.state` shows `WIFI <host> <ip> ok seq=N` or `... backoff Ns (...)`.
 
+## Robustness (P5)
+
+- Sleep/wake & clock jumps: wall vs monotonic divergence > 30s, or > 30s between loop iterations, logs `[bridge] wake/clock jump detected`, resends at once, resets the WiFi backoff and distrusts the cached IP.
+- IP change: after a failed POST (timeout, refused, unreachable) the cached IP is not trusted; each retry re-resolves `<host>.local` (the stale IP is only probed every 3rd attempt while mDNS fails). The new IP is written to `device.json` on success.
+- USB boot race: after (re)acquiring the port the first frame waits for `@{"t":"hello"}` or 2.5s.
+- Logs: `serial/YYYYMMDD.log` older than 14 days are deleted; past ~5 MB a day keeps only `[bridge]` events and `@` protocol / `<< wifi ack` lines (past 10 MB only events). WiFi acks are logged as `<< wifi ack seq=N ip=X` (used by `doctor`).
+
+## Install (P6)
+
+```sh
+cd host
+P=~/.platformio/penv/bin/python3
+$P -m ctm.cli install --statusline --dry-run   # show the plist, launchctl commands, settings change
+$P -m ctm.cli install --statusline             # [--replace] stop a hand-started bridge; [--force] replace another statusLine
+$P -m ctm.cli doctor
+$P -m ctm.cli uninstall [--statusline] [--dry-run]
+```
+
+The plist runs `<python> -u -m ctm.bridge --transport auto` in this directory (RunAtLoad, KeepAlive, ThrottleInterval 10, output in `~/.claude-token-meter/launchd/`). `--python` picks another interpreter (it must import `serial`).
+
 ## CLI
 
 ```sh
@@ -94,4 +116,4 @@ Shared fixtures are in `../fixtures/`:
 - `frame_*.json`: `{line, last_seq, expected: {result: ack|nak, err?, windows?}}`. Firmware native tests should reach the same verdicts.
 - `hmac_*.json`: `{key_hex, body, sig, expected: ok|sig}` (§4.4), checked by `tests/test_wifi.py`.
 
-Tests never open a serial port, never touch the real Keychain (`tests/_util.py` makes `keystore.default()` raise) and use temp `CTM_HOME` directories.
+Tests never open a serial port, never touch the real Keychain (`tests/_util.py` makes `keystore.default()` raise) and use temp `CTM_HOME` directories. Install/doctor tests use temp LaunchAgents / settings.json paths and a fake `launchctl`.

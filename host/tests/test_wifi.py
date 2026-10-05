@@ -195,6 +195,8 @@ class Http(unittest.TestCase):
         c = wifi.WifiClient("x", KEY, "10.0.0.9", resolver=lambda n: None, request=req)
         r = c.post_state(b"{}")
         self.assertEqual((r.kind, r.errno), ("net", errno.EHOSTUNREACH))
+        # (after a failure c distrusts its cached ip; use a fresh client)
+        c = wifi.WifiClient("x", KEY, "10.0.0.9", resolver=lambda n: None, request=req)
         info, ip, err = c.get_info()
         self.assertIn("Local Network", err)
 

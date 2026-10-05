@@ -6,6 +6,9 @@
   python -m ctm.cli info [--wifi] [--port-serial N]
   python -m ctm.cli push-test --pct5 52 --pct7 29   # fake session file
   python -m ctm.cli push-test --clear               # delete fake session files
+  python -m ctm.cli doctor                          # health report (PASS/FAIL/SKIP)
+  python -m ctm.cli install [--statusline [--force]] [--python P] [--replace] [--dry-run]
+  python -m ctm.cli uninstall [--statusline] [--dry-run]
 
 push-test writes <CTM_HOME>/sessions/test-<ts>.json with resets_at in the
 future so a running bridge picks it up. Because of the merge rules (latest
@@ -180,6 +183,22 @@ def run_pairing_cmd(args, home, env=None):
         return 130
 
 
+def run_install_cmd(args, paths=None, ops=None, out=sys.stdout):
+    from ctm import install as _install
+    paths = paths or _install.Paths()
+    ops = ops or _install.Ops()
+    try:
+        if args.cmd == "install":
+            return _install.install(paths, ops, out, python=args.python, replace=args.replace,
+                                    statusline=args.statusline, force=args.force,
+                                    dry_run=args.dry_run)
+        return _install.uninstall(paths, ops, out, statusline=args.statusline,
+                                  dry_run=args.dry_run)
+    except _install.InstallError as e:
+        sys.stderr.write("ctm %s: %s\n" % (args.cmd, e))
+        return 2
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="ctm")
     sub = ap.add_subparsers(dest="cmd")
@@ -201,8 +220,28 @@ def main(argv=None):
     pt.add_argument("--pct5", type=_pct)
     pt.add_argument("--pct7", type=_pct)
     pt.add_argument("--clear", action="store_true", help="delete all test-*.json session files")
+    sub.add_parser("doctor", help="one-shot health report (PASS/FAIL/SKIP per check)")
+    ins = sub.add_parser("install", help="install + load the bridge LaunchAgent (com.ctm.bridge)")
+    ins.add_argument("--python", help="interpreter with pyserial (default "
+                     "~/.platformio/penv/bin/python3)")
+    ins.add_argument("--replace", action="store_true",
+                     help="stop a hand-started bridge right before the LaunchAgent starts")
+    ins.add_argument("--statusline", action="store_true",
+                     help="also register the statusLine in ~/.claude/settings.json (backup kept)")
+    ins.add_argument("--force", action="store_true",
+                     help="with --statusline: replace a different existing statusLine")
+    ins.add_argument("--dry-run", action="store_true", help="print what would happen, change nothing")
+    un = sub.add_parser("uninstall", help="unload + remove the LaunchAgent")
+    un.add_argument("--statusline", action="store_true",
+                    help="also remove our statusLine from ~/.claude/settings.json")
+    un.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
     home = ctm_home()
+    if args.cmd == "doctor":
+        from ctm import doctor as _doctor
+        return _doctor.run(_doctor.Env())
+    if args.cmd in ("install", "uninstall"):
+        return run_install_cmd(args)
     if args.cmd == "status":
         return cmd_status(home)
     if args.cmd in ("setup", "unpair", "info"):

@@ -19,13 +19,23 @@ Run:  cd host && ~/.platformio/penv/bin/python3 -m ctm.bridge [--transport auto|
 - Polls <CTM_HOME>/sessions every POLL_S, merges, sends a state frame on
   change (min interval MIN_INTERVAL_S), every HEARTBEAT_S, on (re)connect,
   and immediately on a device "@{"t":"hello"}" line.
+- P5 robustness:
+  * Sleep/wake & clock jumps: wall clock vs monotonic divergence > JUMP_S, or a
+    gap > GAP_S between loop iterations -> "[bridge] wake/clock jump detected",
+    immediate resend, WiFi backoff reset, cached IP distrusted (re-resolve mDNS).
+  * USB boot race: after (re)acquiring the port the first frame waits for
+    @hello or USB_HELLO_WAIT_S (opening the port resets the board [V]).
+  * Logs: YYYYMMDD.log older than LOG_KEEP_DAYS are deleted; past LOG_CAP_BYTES
+    a day's log keeps only [bridge] events and @ protocol lines.
 
 Python 3.9 compatible. pyserial is only imported when the port is used.
 """
 import argparse
+import datetime
 import errno
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -64,6 +74,13 @@ ABSENT_RETRY_S = 1.0
 OPEN_FAIL_RETRY_S = 2.0
 PAUSED_SLEEP_S = 0.2
 MAX_RX_BUF = 4096
+JUMP_S = 30.0             # |wall delta - monotonic delta| above this = sleep/wake or clock set
+GAP_S = 30.0              # a loop iteration never legitimately takes this long
+USB_HELLO_WAIT_S = 2.5    # defer the first USB frame until hello or this long (P0/P1 [V])
+LOG_KEEP_DAYS = 14
+LOG_CAP_BYTES = 5 * 1024 * 1024
+LOG_HARD_CAP_BYTES = 2 * LOG_CAP_BYTES  # past this even @ lines are dropped (events kept)
+LOG_NAME_RE = re.compile(r"^(\d{8})\.log$")
 
 
 def ctm_home():
@@ -101,6 +118,32 @@ def next_seq(last_seq, now):
     return min(SEQ_MAX, max(int(last_seq) + 1, int(now)))
 
 
+def prune_logs(serial_dir, now, keep_days=LOG_KEEP_DAYS):
+    """Delete <serial_dir>/YYYYMMDD.log files whose date (from the name, local
+    time) is more than keep_days before now's date. Returns deleted names."""
+    cutoff = datetime.date.fromtimestamp(now) - datetime.timedelta(days=keep_days)
+    out = []
+    try:
+        names = sorted(os.listdir(serial_dir))
+    except OSError:
+        return out
+    for n in names:
+        m = LOG_NAME_RE.match(n)
+        if not m:
+            continue
+        try:
+            d = datetime.datetime.strptime(m.group(1), "%Y%m%d").date()
+        except ValueError:
+            continue
+        if d < cutoff:
+            try:
+                os.unlink(os.path.join(serial_dir, n))
+                out.append(n)
+            except OSError:
+                pass
+    return out
+
+
 def windows_key(windows):
     """What counts as a change: pct / resets_at per window, presence."""
     return tuple(sorted((k, w.get("pct"), w.get("resets_at")) for k, w in windows.items()))
@@ -110,7 +153,8 @@ class Bridge(object):
     def __init__(self, home=None, find_port=find_port, open_port=open_port,
                  clock=time.time, sleep=time.sleep, min_interval=MIN_INTERVAL_S,
                  transport="auto", keystore=None, wifi_factory=None,
-                 wifi_min_interval=WIFI_MIN_INTERVAL_S):
+                 wifi_min_interval=WIFI_MIN_INTERVAL_S, mono=None,
+                 usb_hello_wait=USB_HELLO_WAIT_S, log_cap=LOG_CAP_BYTES):
         if transport not in TRANSPORTS:
             raise ValueError("transport must be one of %s" % (TRANSPORTS,))
         self.home = home or ctm_home()
@@ -120,7 +164,19 @@ class Bridge(object):
         self.find_port = find_port
         self.open_port = open_port
         self.clock = clock
+        # monotonic clock for wake detection. With an injected (fake) wall clock
+        # and no mono, the wall clock doubles as mono: only the gap rule applies.
+        if mono is None:
+            mono = time.monotonic if clock is time.time else clock
+        self.mono = mono
         self.sleep = sleep
+        self.usb_hello_wait = usb_hello_wait
+        self.hello_wait_until = None
+        self.last_tick = None       # (wall, mono) at the previous step()
+        self.log_cap = log_cap
+        self._log_day = None
+        self._log_size = 0
+        self._log_capped = False
         self.min_interval = min_interval
         self.wifi_min_interval = wifi_min_interval
         self.transport = transport
@@ -152,16 +208,40 @@ class Bridge(object):
         self._state = None
 
     # ---- logging / state ----
-    def log(self, line):
+    def _append(self, path, text):
+        data = text.encode("utf-8", "replace")
         try:
             os.makedirs(self.serial_dir, exist_ok=True)
-            with open(os.path.join(self.serial_dir, time.strftime("%Y%m%d") + ".log"), "a") as f:
-                f.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), line))
+            with open(path, "ab") as f:
+                f.write(data)
+            self._log_size += len(data)
         except OSError:
             pass
 
+    def log(self, line, kind="rx"):
+        """kind: rx (free device text), tx, proto (@ lines, acks), event.
+        Past log_cap only events and proto lines are kept; past 2x only events."""
+        day = time.strftime("%Y%m%d")
+        path = os.path.join(self.serial_dir, day + ".log")
+        if day != self._log_day:
+            self._log_day = day
+            self._log_capped = False
+            try:
+                self._log_size = os.path.getsize(path)
+            except OSError:
+                self._log_size = 0
+        if kind != "event" and self._log_size >= self.log_cap:
+            if kind != "proto" or self._log_size >= 2 * self.log_cap:
+                if not self._log_capped:
+                    self._log_capped = True
+                    self._append(path, "%s [bridge] log cap reached (%d bytes): device text "
+                                 "and TX lines dropped until tomorrow\n"
+                                 % (time.strftime("%Y-%m-%d %H:%M:%S"), self._log_size))
+                return
+        self._append(path, "%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), line))
+
     def event(self, msg):
-        self.log("[bridge] " + msg)
+        self.log("[bridge] " + msg, kind="event")
 
     def set_state(self, s):
         if s == self._state:
@@ -183,6 +263,8 @@ class Bridge(object):
             self.last_prune = now
             for n in _merge.prune(self.home, now):
                 self.event("pruned session file %s" % n)
+            for n in prune_logs(self.serial_dir, now):
+                self.event("pruned log %s" % n)
         m = _merge.snapshot_mtimes(self.home)
         if m != self.mtimes:
             self.mtimes = m
@@ -195,6 +277,11 @@ class Bridge(object):
 
     def due(self, now):
         """Should a frame be sent now? Returns reason string or None."""
+        if self.active == "usb" and self.hello_wait_until is not None:
+            if now < self.hello_wait_until:
+                return None     # board is probably still booting (port open resets it)
+            self.hello_wait_until = None
+            self.event("no hello within %.1fs -> sending" % self.usb_hello_wait)
         if self.force_send:
             return "force"
         if self.retry_at is not None and now >= self.retry_at:
@@ -228,12 +315,12 @@ class Bridge(object):
         except Exception:
             pass
         self.mark_sent(frame, now, reason)
-        self.log(">> " + data.decode("utf-8").rstrip("\n") + "  (" + reason + ")")
+        self.log(">> " + data.decode("utf-8").rstrip("\n") + "  (" + reason + ")", kind="tx")
 
     # ---- device lines ----
     def handle_line(self, raw):
         line = raw.rstrip(b"\r").decode("utf-8", "replace")
-        self.log(line)
+        self.log(line, kind="proto" if "@{" in line else "rx")
         msg = _proto.parse_device_line(line)
         if msg is None:
             if line.startswith("@"):
@@ -242,6 +329,7 @@ class Bridge(object):
         t = msg.get("t")
         if t == "hello":
             self.event("device hello fw=%s board=%s -> resend" % (msg.get("fw"), msg.get("board")))
+            self.hello_wait_until = None
             self.force_send = True
         elif t == "nak":
             self.event("NAK seq=%s err=%s" % (msg.get("seq"), msg.get("err")))
@@ -274,9 +362,37 @@ class Bridge(object):
         self.port = None
         self.buf = b""
 
+    # ---- sleep/wake & clock jumps (P5) ----
+    def check_wake(self):
+        """Compare wall and monotonic deltas since the previous iteration.
+        macOS monotonic (mach_absolute_time) stops during system sleep while the
+        wall clock does not, so sleep shows up as divergence; a manual clock
+        change does too. A huge gap (process stopped) is treated the same."""
+        w, m = self.clock(), self.mono()
+        prev, self.last_tick = self.last_tick, (w, m)
+        if prev is None:
+            return False
+        dw, dm = w - prev[0], m - prev[1]
+        if abs(dw - dm) <= JUMP_S and dm <= GAP_S and dw <= GAP_S:
+            return False
+        self.on_wake(dw, dm)
+        return True
+
+    def on_wake(self, dw, dm):
+        self.event("wake/clock jump detected (wall %+.0fs, monotonic %+.0fs) -> resend now"
+                   % (dw, dm))
+        self.force_send = True
+        self.retry_at = None
+        self.last_poll = None        # re-read sessions right away
+        self.backoff.reset()
+        self.wifi_next_try = None
+        if self.wifi is not None:
+            self.wifi.mark_stale()   # re-resolve <host>.local, the DHCP lease may have changed
+
     def step(self):
         """One loop iteration. Every path either blocks on serial read
         (READ_TIMEOUT_S) or sleeps, so the loop never busy-spins."""
+        self.check_wake()
         if self.paused:
             if self.port is not None:
                 self.close_port("paused by SIGUSR1")
@@ -316,6 +432,10 @@ class Bridge(object):
             self.dev = dev
             self.buf = b""
             self.force_send = True
+            # opening resets the board: frames sent while it boots get "nak parse".
+            # Wait for its hello (which also forces a send) or USB_HELLO_WAIT_S.
+            self.hello_wait_until = (self.clock() + self.usb_hello_wait
+                                     if self.usb_hello_wait > 0 else None)
             if self.active != "usb":
                 if self.active is not None:
                     self.event("transport -> usb")
@@ -422,7 +542,7 @@ class Bridge(object):
         frame = self.current_frame(now)
         # §4.2 body: the encoded frame, without the USB-only leading "\n"
         body = _proto.encode_frame(frame)
-        self.log(">> wifi " + body.decode("utf-8").rstrip("\n") + "  (" + reason + ")")
+        self.log(">> wifi " + body.decode("utf-8").rstrip("\n") + "  (" + reason + ")", kind="tx")
         # the seq is spent whether or not the device saw it
         self.seq = frame["seq"]
         r = self.wifi.post_state(body)
@@ -433,6 +553,7 @@ class Bridge(object):
             self.wifi_next_try = None
             if r.reply and r.reply.get("seq") not in (None, frame["seq"]):
                 self.event("ack for seq=%s (last sent %s)" % (r.reply.get("seq"), frame["seq"]))
+            self.log("<< wifi ack seq=%s ip=%s" % (frame["seq"], r.ip or "-"), kind="proto")
             if r.ip and r.ip != self.wifi.cached_ip:
                 self.wifi.cached_ip = r.ip
                 if _device.update_ip(self.home, r.ip):
@@ -479,6 +600,8 @@ class Bridge(object):
             f.write(str(os.getpid()))
         self.event("start pid=%d serial_no=%s home=%s transport=%s"
                    % (os.getpid(), SERIAL_NO, self.home, self.transport))
+        for n in prune_logs(self.serial_dir, self.clock()):
+            self.event("pruned log %s" % n)
         try:
             while not self.stop:
                 self.step()

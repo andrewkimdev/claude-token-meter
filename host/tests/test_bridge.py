@@ -102,7 +102,12 @@ class Base(unittest.TestCase):
 
         self.b = bridge.Bridge(home=self.home, find_port=find, open_port=opener,
                                clock=self.clock, sleep=self.clock.sleep,
-                               keystore=keystore.MemoryKeystore())
+                               keystore=keystore.MemoryKeystore(),
+                               usb_hello_wait=self.HELLO_WAIT)
+
+    # Legacy P1-P4 tests send on connect; the P5 hello deferral is tested in
+    # test_robustness.py with the real default.
+    HELLO_WAIT = 0
 
     def tearDown(self):
         self.tmp.cleanup()

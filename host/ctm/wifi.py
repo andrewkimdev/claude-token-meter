@@ -17,6 +17,11 @@ import threading
 
 HTTP_TIMEOUT_S = 3.0
 RESOLVE_TIMEOUT_S = 2.0
+# P5: once a request to an address failed, the cached IP is not trusted:
+# every attempt re-resolves <host>.local first. While mDNS keeps failing the
+# stale cached IP is only probed on every STALE_PROBE_EVERY-th attempt, so a
+# network whose multicast is broken (mDNS never works) cannot lock us out.
+STALE_PROBE_EVERY = 3
 MAX_BODY = 1024
 LOCAL_NETWORK_HINT = ("EHOSTUNREACH: check macOS System Settings > Privacy & Security > "
                       "Local Network (allow the terminal / python running the bridge)")
@@ -121,12 +126,19 @@ class WifiClient(object):
         self.resolver = resolver
         self.request = request
         self.timeout = timeout
+        self.stale = False       # an attempt failed: re-resolve, do not trust cached_ip
+        self._stale_skips = 0
+
+    def mark_stale(self):
+        """Distrust the cached IP until the next success (failure, wake)."""
+        self.stale = True
 
     def __repr__(self):
         return "WifiClient(host=%r, ip=%r)" % (self.host, self.cached_ip)
 
     def address(self):
-        """(ip, source) where source is 'mdns' or 'cache'; (None, None) if neither."""
+        """(ip, source) where source is 'mdns', 'cache' or 'stale-probe';
+        (None, None) if neither. mDNS is always asked first."""
         ip = None
         try:
             ip = self.resolver(self.host + ".local")
@@ -135,8 +147,19 @@ class WifiClient(object):
         if ip:
             return ip, "mdns"
         if self.cached_ip:
-            return self.cached_ip, "cache"
+            if not self.stale:
+                return self.cached_ip, "cache"
+            self._stale_skips += 1
+            if self._stale_skips >= STALE_PROBE_EVERY:
+                self._stale_skips = 0
+                return self.cached_ip, "stale-probe"
         return None, None
+
+    def _no_address(self):
+        if self.cached_ip and self.stale:
+            return ("cannot resolve %s.local (cached ip %s failed earlier, not trusted)"
+                    % (self.host, self.cached_ip))
+        return "cannot resolve %s.local and no cached ip" % self.host
 
     def headers(self, body):
         return {"Content-Type": "application/json",
@@ -148,23 +171,31 @@ class WifiClient(object):
             raise ValueError("body exceeds %d bytes" % MAX_BODY)
         ip, _src = self.address()
         if not ip:
-            return Result("resolve", err="cannot resolve %s.local and no cached ip" % self.host)
+            return Result("resolve", err=self._no_address())
         try:
             status, data = self.request(ip, self.port, "POST", "/v1/state", body,
                                         self.headers(body), self.timeout)
         except socket.timeout:
+            self.mark_stale()
             return Result("net", err="timeout", ip=ip, errno_=errno.ETIMEDOUT)
         except OSError as e:
+            self.mark_stale()
             return Result("net", err=e.strerror or str(e), ip=ip, errno_=e.errno)
         except http.client.HTTPException as e:
+            self.mark_stale()
             return Result("net", err="http: %s" % type(e).__name__, ip=ip)
-        return interpret(status, data, ip)
+        r = interpret(status, data, ip)
+        if r.ok:
+            # cached_ip itself is updated by the caller (bridge) together with device.json
+            self.stale = False
+            self._stale_skips = 0
+        return r
 
     def get_info(self):
         """GET /v1/info (unsigned). Returns (dict|None, ip, error string|None)."""
         ip, _src = self.address()
         if not ip:
-            return None, None, "cannot resolve %s.local and no cached ip" % self.host
+            return None, None, self._no_address()
         try:
             status, data = self.request(ip, self.port, "GET", "/v1/info", None,
                                         {"Host": "%s.local" % self.host}, self.timeout)

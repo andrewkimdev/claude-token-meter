@@ -32,6 +32,9 @@ class FakeWifi(object):
     def get_info(self):
         return self.info, self.cached_ip, None
 
+    def mark_stale(self):
+        pass
+
     def frames(self):
         return [json.loads(b) for b in self.bodies]
 
