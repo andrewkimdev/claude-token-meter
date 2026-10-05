@@ -244,6 +244,20 @@ class Setup(Base):
         self.assert_paused_then_resumed_after_close()
         self.assertEqual([c["t"] for c in self.devs[0].cmds], ["scan"])
 
+    def test_no_tty_refuses_before_touching_bridge(self):
+        import io, sys as _sys
+        args = Namespace(cmd="setup", dry_run=False, ssid=None, port_serial=None)
+        old_in, old_err = _sys.stdin, _sys.stderr
+        _sys.stdin, _sys.stderr = io.StringIO(""), io.StringIO()
+        try:
+            rc = cli.run_pairing_cmd(args, self.home)   # real console path
+            msg = _sys.stderr.getvalue()
+        finally:
+            _sys.stdin, _sys.stderr = old_in, old_err
+        self.assertEqual(rc, 2)
+        self.assertIn("interactive terminal", msg)
+        self.assertEqual(self.devs, [])   # nothing opened
+
     def test_quit(self):
         self.answers = ["q"]
         self.assertEqual(pairing.run_setup(self.env), 1)

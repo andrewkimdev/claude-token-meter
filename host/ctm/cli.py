@@ -154,9 +154,20 @@ def _pct(s):
 
 def run_pairing_cmd(args, home, env=None):
     from ctm import pairing as _pairing
+    real_console = env is None   # tests inject env with a fake console
     env = env or _pairing.Env(home=home, serial_no=getattr(args, "port_serial", None))
     try:
         if args.cmd == "setup":
+            # setup asks for an SSID choice and a password, so it needs a real
+            # terminal. Claude Code's `!` prefix has no TTY: fail loudly before
+            # touching the bridge instead of silently getting EOF [V].
+            if real_console and not args.dry_run and not (sys.stdin.isatty() and sys.stdout.isatty()):
+                sys.stderr.write(
+                    "ctm setup needs an interactive terminal (it asks for the WiFi password).\n"
+                    "Run it in Terminal/iTerm, not via Claude Code's `!` prefix:\n"
+                    "  cd %s && ~/.platformio/penv/bin/python3 -m ctm.cli setup\n"
+                    % os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                return 2
             return _pairing.run_setup(env, dry_run=args.dry_run, ssid=args.ssid)
         if args.cmd == "unpair":
             return _pairing.run_unpair(env, local_only=args.local, dry_run=args.dry_run)
