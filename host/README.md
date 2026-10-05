@@ -27,10 +27,10 @@ The script prints `5h 52% · 7d 29%`. It prints `--` when a value is unknown and
 
 ## WiFi setup (pairing)
 
-`ctm setup` is interactive (it asks for the WiFi password with a hidden prompt), so **you run it yourself** with the board plugged in by USB. From Claude Code use the `!` prefix, or use a normal terminal:
+`ctm setup` is interactive (it asks for the WiFi password with a hidden prompt), so **you run it yourself** with the board plugged in by USB, **in a normal terminal (Terminal/iTerm)**. Claude Code's `!` prefix has no interactive stdin, so setup refuses to run there (exit 2):
 
 ```sh
-! cd host && ~/.platformio/penv/bin/python3 -m ctm.cli setup
+cd host && ~/.platformio/penv/bin/python3 -m ctm.cli setup
 ```
 
 What it does:
