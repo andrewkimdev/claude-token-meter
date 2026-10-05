@@ -640,8 +640,8 @@ static void test_hostname_and_info() {
   TEST_ASSERT_EQUAL_STRING("connected", d["wifi"].as<const char *>());
   TEST_ASSERT_TRUE(d["provisioned"].as<bool>());
   // worst case still fits INFO_BUF
-  f.ip = "192.168.219.106";
-  f.host = "ctmeter-8f70";
+  f.ip = "192.168.255.255";
+  f.host = "ctmeter-a1b2";
   f.reset = "deepsleep";
   f.wifi = "connecting";
   f.rssi = -100;

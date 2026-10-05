@@ -61,7 +61,7 @@ def resolve(name):
 
 def main():
     label = sys.argv[1] if len(sys.argv) > 1 else "unlabeled"
-    gw = sys.argv[2] if len(sys.argv) > 2 else "192.168.219.1"
+    gw = sys.argv[2] if len(sys.argv) > 2 else "192.168.1.1"
     lan = sys.argv[3] if len(sys.argv) > 3 else None
     lhn = sys.argv[4] if len(sys.argv) > 4 else None
     if not lhn:

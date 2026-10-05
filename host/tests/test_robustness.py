@@ -83,7 +83,7 @@ class WakeWifi(WifiBase):
         def mark():
             self.w.stale_marks += 1
         self.w.mark_stale = mark
-        self.w.replies.extend([wifi.Result("net", err="timeout", ip="192.168.1.40",
+        self.w.replies.extend([wifi.Result("net", err="timeout", ip="192.0.2.40",
                                            errno_=errno.ETIMEDOUT)] * 4)
         self.run_for(40)          # fails at 0, 5, 15, 35 -> next try at 75
         n = len(self.w.bodies)

@@ -10,7 +10,11 @@ Run:  cd host && ~/.platformio/penv/bin/python3 -m ctm.bridge [--transport auto|
   heartbeat 120s, exponential backoff (max 10 min) on failure.
 
 - Owns the target serial port like tools/serial_hold.py: found by USB serial
-  number (CTM_USB_SERIAL), opened with DTR/RTS low, then TIOCEXCL.
+  number (--usb-serial > CTM_USB_SERIAL > <CTM_HOME>/config.json, see
+  ctm.board), opened with DTR/RTS low, then TIOCEXCL. With no board selected
+  USB is off (WiFi only, if paired): the bridge never opens a port it was not
+  told about. config.json is re-read while no port is held, so
+  `ctm select-board` takes effect without a restart.
   `kill -USR1 $(cat ~/.claude-token-meter/serial/hold.pid)` toggles
   release / re-acquire (e.g. around a firmware upload).
 - State: <CTM_HOME>/serial/hold.state, pid: hold.pid,
@@ -41,6 +45,7 @@ import sys
 import time
 
 try:
+    from ctm import board as _board
     from ctm import merge as _merge
     from ctm import proto as _proto
     from ctm import device as _device
@@ -48,13 +53,13 @@ try:
     from ctm import wifi as _wifi
 except ImportError:  # run as a script: host/ctm/bridge.py
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from ctm import board as _board
     from ctm import merge as _merge
     from ctm import proto as _proto
     from ctm import device as _device
     from ctm import keystore as _keystore
     from ctm import wifi as _wifi
 
-SERIAL_NO = os.environ.get("CTM_USB_SERIAL", "5915018996")
 BAUD = 115200
 READ_TIMEOUT_S = 0.5      # serial read blocks at most this long -> no busy loop
 WRITE_TIMEOUT_S = 2.0
@@ -89,13 +94,13 @@ def ctm_home():
 
 # ---- real serial helpers (same approach as tools/serial_hold.py) ----------
 
-def find_port(serial_no=None):
-    from serial.tools import list_ports
-    serial_no = serial_no or SERIAL_NO
-    for p in list_ports.comports():
-        if p.serial_number and p.serial_number.startswith(serial_no) and "cu." in p.device:
-            return p.device
-    return None
+def find_port(serial_no):
+    """Device of the board with this USB serial; None if absent or serial_no
+    is None (no board selected: never scan for 'any' port). Raises
+    board.BoardError when several ports match."""
+    if not serial_no:
+        return None
+    return _board.find_port(serial_no)
 
 
 def open_port(dev):
@@ -150,18 +155,24 @@ def windows_key(windows):
 
 
 class Bridge(object):
-    def __init__(self, home=None, find_port=find_port, open_port=open_port,
+    def __init__(self, home=None, find_port=None, open_port=open_port,
                  clock=time.time, sleep=time.sleep, min_interval=MIN_INTERVAL_S,
                  transport="auto", keystore=None, wifi_factory=None,
                  wifi_min_interval=WIFI_MIN_INTERVAL_S, mono=None,
-                 usb_hello_wait=USB_HELLO_WAIT_S, log_cap=LOG_CAP_BYTES):
+                 usb_hello_wait=USB_HELLO_WAIT_S, log_cap=LOG_CAP_BYTES,
+                 usb_serial=None):
         if transport not in TRANSPORTS:
             raise ValueError("transport must be one of %s" % (TRANSPORTS,))
         self.home = home or ctm_home()
         self.serial_dir = os.path.join(self.home, "serial")
         self.state_path = os.path.join(self.serial_dir, "hold.state")
         self.pid_path = os.path.join(self.serial_dir, "hold.pid")
-        self.find_port = find_port
+        # usb_serial: explicit --usb-serial; else env / config.json, re-read
+        # while no port is held (ctm select-board needs no restart).
+        self.usb_serial_flag = usb_serial
+        self.serial_no, self.serial_src = _board.resolve_serial(usb_serial, self.home)
+        self._no_board_logged = False
+        self.find_port = find_port or self.find_configured_port
         self.open_port = open_port
         self.clock = clock
         # monotonic clock for wake detection. With an injected (fake) wall clock
@@ -351,6 +362,29 @@ class Bridge(object):
             self.handle_line(self.buf)
             self.buf = b""
 
+    # ---- board selection ----
+    def refresh_board(self):
+        sn, src = _board.resolve_serial(self.usb_serial_flag, self.home)
+        if sn != self.serial_no:
+            self.event("target board usb_serial %s -> %s (%s)"
+                       % (self.serial_no or "none", sn or "none", src))
+            self._no_board_logged = False
+        self.serial_no, self.serial_src = sn, src
+        return sn
+
+    def find_configured_port(self):
+        """Default find_port: only ever the selected board, never 'any' port."""
+        sn = self.refresh_board()
+        if not sn:
+            if not self._no_board_logged:
+                self._no_board_logged = True
+                self.event(_board.NO_BOARD_HINT + " (USB off; WiFi only if paired)")
+            return None
+        return find_port(sn)
+
+    def no_board(self):
+        return self.find_port == self.find_configured_port and not self.serial_no
+
     # ---- port lifecycle ----
     def close_port(self, why):
         if self.port is not None:
@@ -416,7 +450,10 @@ class Bridge(object):
                 if self.transport == "auto" and self.wifi_ready():
                     self.wifi_step()
                     return
-                if self.transport == "usb":
+                if self.no_board():
+                    if self._state is None or not self._state.startswith("WAITING (paired"):
+                        self.set_state("WAITING (%s)" % _board.NO_BOARD_HINT)
+                elif self.transport == "usb":
                     self.set_state("WAITING (device not present)")
                 else:
                     self.wait_state_unpaired()
@@ -598,8 +635,9 @@ class Bridge(object):
         os.makedirs(self.serial_dir, exist_ok=True)
         with open(self.pid_path, "w") as f:
             f.write(str(os.getpid()))
-        self.event("start pid=%d serial_no=%s home=%s transport=%s"
-                   % (os.getpid(), SERIAL_NO, self.home, self.transport))
+        self.event("start pid=%d usb_serial=%s (%s) home=%s transport=%s"
+                   % (os.getpid(), self.serial_no or "none", self.serial_src, self.home,
+                      self.transport))
         for n in prune_logs(self.serial_dir, self.clock()):
             self.event("pruned log %s" % n)
         try:
@@ -641,8 +679,11 @@ def main(argv=None):
                     help="start even if hold.pid names another live process")
     ap.add_argument("--transport", choices=TRANSPORTS, default="auto",
                     help="auto: USB if the target device is plugged in, else WiFi if paired")
+    ap.add_argument("--usb-serial", metavar="N",
+                    help="USB serial number of the board (default: CTM_USB_SERIAL, "
+                    "then <CTM_HOME>/config.json from ctm select-board; none = USB off)")
     args = ap.parse_args(argv)
-    b = Bridge(transport=args.transport)
+    b = Bridge(transport=args.transport, usb_serial=args.usb_serial)
     if args.once:
         now = time.time()
         b.poll_sessions(now, force=True)

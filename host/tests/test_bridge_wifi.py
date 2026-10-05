@@ -27,7 +27,7 @@ class FakeWifi(object):
         if self.replies:
             return self.replies.pop(0)
         seq = json.loads(body)["seq"]
-        return wifi.Result("ack", 200, None, {"t": "ack", "seq": seq}, "192.168.1.50")
+        return wifi.Result("ack", 200, None, {"t": "ack", "seq": seq}, "192.0.2.50")
 
     def get_info(self):
         return self.info, self.cached_ip, None
@@ -54,7 +54,7 @@ class WifiBase(Base):
         self.b.wifi_factory = factory
         self.present = False
 
-    def pair(self, host="ctmeter-a1b2", ip="192.168.1.40", key=KEY_HEX):
+    def pair(self, host="ctmeter-a1b2", ip="192.0.2.40", key=KEY_HEX):
         device.save(self.home, host, ip, 1791100000)
         if key:
             self.ks.set(host, key)
@@ -162,10 +162,10 @@ class WifiPolicy(WifiBase):
         self.assertEqual(len(self.w.bodies), 2)
 
     def test_ack_updates_cached_ip(self):
-        self.pair(ip="192.168.1.40")
+        self.pair(ip="192.0.2.40")
         self.run_for(2)
-        self.assertEqual(device.load(self.home)["ip"], "192.168.1.50")
-        self.assertIn("cached ip for ctmeter-a1b2 -> 192.168.1.50", self.logtext())
+        self.assertEqual(device.load(self.home)["ip"], "192.0.2.50")
+        self.assertIn("cached ip for ctmeter-a1b2 -> 192.0.2.50", self.logtext())
         self.assertEqual(len(self.clients), 1)   # own ip update does not re-pair
 
     def test_401_logs_mismatch_and_backs_off(self):
@@ -198,7 +198,7 @@ class WifiPolicy(WifiBase):
     def test_ehostunreach_hint(self):
         self.pair()
         self.b.wifi_ready()
-        self.w.replies.append(wifi.Result("net", err="No route to host", ip="192.168.1.40",
+        self.w.replies.append(wifi.Result("net", err="No route to host", ip="192.0.2.40",
                                           errno_=errno.EHOSTUNREACH))
         self.run_for(1)
         self.assertIn("Local Network", self.logtext())

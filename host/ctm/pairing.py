@@ -8,7 +8,9 @@ Flow of setup:
   1. If a bridge (or tools/serial_hold.py) holds the port (hold.pid alive),
      send SIGUSR1, wait for hold.state "PAUSED" (5s). It is ALWAYS resumed at
      the end (finally; also on Ctrl-C / SIGTERM / SIGHUP).
-  2. Find the target by USB serial number, open it with DTR/RTS low +
+  2. Find the target by USB serial number (--port-serial > CTM_USB_SERIAL >
+     config.json; `ctm setup` runs `ctm select-board` first when none is
+     configured), open it with DTR/RTS low +
      TIOCEXCL (ctm.bridge.open_port). Opening may reset the board: wait for
      @{"t":"hello"} (<= 6s) or go on after the timeout.
   3. {"t":"scan"} -> numbered list -> pick (or type a hidden SSID) ->
@@ -31,6 +33,7 @@ import time
 
 try:
     from ctm import bridge as _bridge
+    from ctm import board as _board
     from ctm import device as _device
     from ctm import keystore as _keystore
     from ctm import proto as _proto
@@ -38,6 +41,7 @@ try:
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from ctm import bridge as _bridge
+    from ctm import board as _board
     from ctm import device as _device
     from ctm import keystore as _keystore
     from ctm import proto as _proto
@@ -263,7 +267,7 @@ class Env(object):
                  serial_no=None, token=secrets.token_bytes):
         self.home = home or _device.ctm_home()
         self.keystore = keystore
-        self.serial_no = serial_no or _bridge.SERIAL_NO
+        self.serial_no = _board.resolve_serial(serial_no, self.home)[0]
         self.find_port = find_port or (lambda: _bridge.find_port(self.serial_no))
         self.open_port = open_port or _bridge.open_port
         self.console = console or Console()
@@ -284,6 +288,14 @@ def _find(env):
     except ImportError:
         raise SetupError("pyserial is not installed for this python; use "
                          "~/.platformio/penv/bin/python3")
+    except _board.BoardError as e:
+        raise SetupError(str(e))
+
+
+def _not_found(env):
+    if not env.serial_no:
+        return "No board selected \u2014 run `ctm select-board` (or pass --port-serial N)."
+    return "Target device (USB serial %s) not found." % env.serial_no
 
 
 class _Session(object):
@@ -389,7 +401,8 @@ def run_setup(env, dry_run=False, ssid=None):
         c.say("(dry-run) nothing is opened or sent.")
         c.say("(dry-run) port holder: %s" % ("pid %d -> SIGUSR1 pause, resume at end" % holder
                                             if holder else "none"))
-        c.say("(dry-run) target USB serial %s: %s" % (env.serial_no, dev or "NOT FOUND"))
+        c.say("(dry-run) target USB serial %s: %s" % (
+            env.serial_no or "none (ctm select-board would run first)", dev or "NOT FOUND"))
         c.say("(dry-run) would send: %s" % json.dumps({"t": "scan"}))
         c.say("(dry-run) would send: %s" % masked(
             {"t": "provision", "ssid": ssid or "<chosen ssid>", "pass": "x", "key": "x"}))
@@ -399,8 +412,7 @@ def run_setup(env, dry_run=False, ssid=None):
 
     dev = _find(env)
     if not dev:
-        c.say("Target device (USB serial %s) not found. Connect it by USB and retry."
-              % env.serial_no)
+        c.say(_not_found(env) + " Connect it by USB and retry.")
         return 2
     with _Session(env, dev) as link:
         choice = _choose_network(link, c)
@@ -461,8 +473,8 @@ def run_unpair(env, local_only=False, dry_run=False):
     if not local_only:
         dev = _find(env)
         if not dev:
-            c.say("Target device (USB serial %s) not found. Connect it by USB, "
-                  "or use --local to forget the pairing on this Mac only." % env.serial_no)
+            c.say(_not_found(env) + " Connect it by USB, "
+                  "or use --local to forget the pairing on this Mac only.")
             return 2
         with _Session(env, dev) as link:
             link.send({"t": "unpair"})

@@ -38,3 +38,7 @@ def _no_real_keychain(*_a, **_k):
 
 
 _keystore.default = _no_real_keychain
+
+# Guard: the developer's own CTM_USB_SERIAL must not leak into tests (each test
+# that needs a board sets it up in a temp CTM_HOME / via mock.patch.dict).
+os.environ.pop("CTM_USB_SERIAL", None)

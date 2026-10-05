@@ -1,75 +1,177 @@
-# Claude Token Meter
+# claude-token-meter
 
-LilyGO T-Display(클래식 ESP32)에 **이 Mac에 로그인된 Claude 구독 계정의 사용 한도**를 표시하는 전용 장치다. 5시간 창과 7일 창의 사용률, 리셋 시각, 페이스를 보여 주고 다른 기능은 없다.
+A tiny desk display that shows how much of your **Claude subscription usage limit** you've used — the rolling **5-hour** window and the **weekly (7-day)** window — at a glance, without opening a browser.
 
-- 데이터는 Claude Code statusLine JSON의 `rate_limits`에서만 가져온다. Claude Code가 이미 받은 응답에 편승하므로 Anthropic으로 가는 추가 요청은 없다.
-- Mac 브리지가 HMAC으로 서명한 HTTP POST로 WiFi를 통해 디바이스에 값을 보낸다. USB 시리얼은 대체 경로다.
+[한국어 README](README-KR.md)
 
-자세한 설계는 `docs/ARCHITECTURE.md`, 프로토콜은 `docs/PROTOCOL.md`, 실측 기록은 `docs/P0_FINDINGS.md`, 호스트 도구는 `host/README.md`에 있다.
+<p>
+  <img src="docs/images/meter.png" alt="Meter: 5H 47% resets in 2h13m, 7D 21% resets in 3d04h" width="360">
+  <img src="docs/images/meter-busy.png" alt="Meter running ahead of pace: 5H 83% orange, 7D 61% amber" width="360">
+</p>
 
-## 구조
+It runs on a [LilyGO T-Display](https://www.lilygo.cc/products/lilygo-t-display-esp32-1-14-inch) (classic ESP32, 240×135 IPS) and gets its numbers from **Claude Code on your Mac**. It makes **zero extra requests to Anthropic** and never touches your Claude credentials.
+
+## How it reads your usage
+
+Claude Code passes a JSON blob to its [status line](https://code.claude.com/docs/en/statusline) command on every assistant message. For Pro and Max subscribers that blob includes `rate_limits.five_hour` and `rate_limits.seven_day`, each with `used_percentage` and `resets_at`. This project registers a tiny status-line script that saves those numbers locally. A background bridge on your Mac then pushes them to the device over USB or WiFi.
 
 ```
-[Claude Code 세션들] --stdin JSON--> host/ctm/statusline.py (≤20ms, 네트워크 없음)
-                                          │ 세션별 atomic write
-                                          ▼
-                         ~/.claude-token-meter/sessions/<session_id>.json
-                                          │ 폴링 2s
-                                          ▼
-                  ctm-bridge (LaunchAgent com.ctm.bridge, Python)
-                    ├─ 병합: 창별 (resets_at 큰 쪽 → 같으면 max pct)
-                    ├─ 송신: 변화 시 즉시 + 하트비트 120s, 웨이크 시 즉시
-                    ├─ 서명: HMAC-SHA256(pairing_key, body)
-                    └─ 전송: USB가 꽂혀 있으면 USB 시리얼, 아니면 WiFi(mDNS → HTTP POST)
-                                          ▼
-                    T-Display 펌웨어: 검증 → 상태 머신 → 렌더
+Claude Code sessions ──stdin JSON──▶ host/ctm/statusline.py   (~20 ms, no network)
+                                        │ one file per session
+                                        ▼
+                        ~/.claude-token-meter/sessions/*.json
+                                        │
+                                        ▼
+                   bridge (LaunchAgent com.ctm.bridge, Python)
+                     ├─ merge: per window, latest reset wins, same window → max %
+                     ├─ send: on change + heartbeat every 120 s, resend on wake
+                     └─ USB serial if the board is plugged in, else WiFi
+                        (mDNS + HTTP POST signed with HMAC-SHA256)
+                                        ▼
+                     T-Display firmware: verify → state → render
 ```
 
-## 빠른 시작
+What follows from this design:
 
-준비물: T-Display, USB 케이블, PlatformIO(`~/.platformio/penv`, pyserial 포함), 2.4GHz WiFi.
+- **The numbers update only while you use Claude Code.** Usage on claude.ai or the desktop/mobile apps counts toward the same limits. It appears on the meter with your next Claude Code message. The footer always shows how old the data is.
+- **Concurrent sessions are handled.** Different Claude Code sessions report different values, because each one remembers its own last response. The bridge merges them: within the same window, usage never goes down, so it takes the maximum.
+- **No Anthropic login, no API key, no polling.** The Mac only talks to the device on your LAN or over USB.
 
-1. **펌웨어 굽기** (보드를 USB로 연결)
-   ```sh
-   ~/.platformio/penv/bin/pio run -d firmware -e t-display -t upload
-   ```
-2. **브리지와 statusLine 설치**
-   ```sh
-   cd host
-   ~/.platformio/penv/bin/python3 -m ctm.cli install --statusline --dry-run   # 먼저 확인
-   ~/.platformio/penv/bin/python3 -m ctm.cli install --statusline
-   ```
-   - `~/Library/LaunchAgents/com.ctm.bridge.plist`를 쓰고 `launchctl bootstrap`으로 띄운다. 로그인할 때 자동으로 시작되고, 죽으면 다시 뜬다.
-   - `~/.claude/settings.json`의 `statusLine`을 등록한다. 기존 파일은 `settings.json.bak-ctm-<시각>`으로 백업한다. 다른 statusLine이 이미 있으면 바꾸지 않고 멈춘다(`--force`로 교체).
-   - 셸에서 직접 띄운 브리지가 돌고 있으면 거부한다. `--replace`를 주면 bootstrap 직전에 그것을 멈춘다.
-3. **WiFi 페어링**: 반드시 **일반 터미널(Terminal/iTerm)**에서 실행한다.
-   ```sh
-   cd host && ~/.platformio/penv/bin/python3 -m ctm.cli setup
-   ```
-   SSID를 고르고 비밀번호를 입력하면 끝이다. 이후에는 USB를 빼고 충전기 전원만 연결해도 WiFi로 갱신된다.
-4. **확인**
-   ```sh
-   cd host && ~/.platformio/penv/bin/python3 -m ctm.cli doctor
-   ```
+## Reading the screen
 
-제거: `ctm uninstall [--statusline]`. 로그, 세션 파일, 페어링은 남는다. 페어링까지 지우려면 `ctm unpair`를 실행한다.
+| Element | Meaning |
+|---|---|
+| Big number | 5-hour window usage (%) and time until it resets |
+| Small number | 7-day window usage (%) and time until it resets |
+| Bars | Usage of each window |
+| Cyan tick on a bar | **Pace**: how much of the window's time has elapsed. A bar past its tick means you're using the limit faster than it refills. |
+| Colors | Neutral at or below pace, **amber** above pace, **orange** ≥ 80 %, **red** ≥ 95 % |
+| Footer dot | Green: data arrived ≤ 150 s ago. Grey: older. Red + "host offline": nothing for > 5 min. "USB" / "WiFi" shows how the last update arrived. |
+| `restored` | Shown after power-on with the last saved values, until the Mac sends fresh data. Times show `--` until the clock is set. |
+| `0% · reset` (grey) | That window's reset time has passed. It's an estimate until Claude Code sees a new response. |
 
-## 문제 해결
+**Buttons:**
 
-- **`ctm doctor`부터 실행한다.** statusLine 등록, 세션 파일과 병합 값, 브리지 프로세스, LaunchAgent, 전송 경로, 디바이스 도달(USB 존재, WiFi `/v1/info`), Keychain 페어링 키 존재(값은 출력하지 않음), 마지막 ACK 시각을 각각 PASS/FAIL/SKIP으로 보여 준다. 모든 검사가 실행됐을 때만 최종 판정을 낸다.
-- **로컬 네트워크 권한**: 브리지 로그에 `EHOSTUNREACH`나 "Local Network" 안내가 보이면 시스템 설정 > 개인정보 보호 및 보안 > 로컬 네트워크에서 브리지를 실행하는 python을 허용한다. 새 Mac에서는 첫 송신 때 허용 프롬프트가 뜰 수 있다.
-- **`curl`로 디바이스를 볼 때는 `curl -4`를 쓴다.** 옵션 없이 쓰면 `.local`의 IPv6를 먼저 시도하다 시간 초과가 난다. 브리지와 `doctor`는 IPv4만 쓰므로 영향이 없다.
-  ```sh
-  curl -4 http://ctmeter-xxxx.local/v1/info
-  ```
-- **Claude Code의 `!` 접두사에는 TTY가 없다.** 그래서 `ctm setup`은 거기서 실행되지 않고 exit 2로 거부한다. 일반 터미널에서 실행한다.
-- **슬립/웨이크, 공유기 재부팅, IP 변경**: 브리지가 웨이크를 감지하면 즉시 다시 보내고 백오프를 초기화한다. 송신이 실패하면 캐시된 IP를 믿지 않고 매 재시도 전에 `<host>.local`을 다시 해석하며, 성공하면 `device.json`의 IP를 갱신한다.
-- **펌웨어를 다시 구울 때**: 브리지가 포트를 독점하고 있다. `kill -USR1 $(cat ~/.claude-token-meter/serial/hold.pid)`로 해제하고 업로드한 다음, 같은 명령으로 다시 잡는다.
-- **로그**: `~/.claude-token-meter/serial/YYYYMMDD.log`(14일 보관, 하루 약 5MB 상한. 상한을 넘으면 브리지 이벤트와 프로토콜 줄만 남긴다), launchd 출력은 `~/.claude-token-meter/launchd/`에 있다.
+- **BTN1** (GPIO35, short press) opens a detail view: reset times in local time, WiFi/IP/RSSI, uptime, heap, and reconnect counters. It returns to the meter after 15 s.
+- **BTN2** (GPIO0) cycles the backlight between 100 %, 40 % and 10 %.
+- The backlight dims by itself after 60 min without changes.
 
-## 프라이버시
+<img src="docs/images/detail.png" alt="Detail view" width="360">
 
-- Anthropic 자격증명(OAuth 토큰, Keychain의 `Claude Code-credentials`)을 읽지도 쓰지도 않는다. 디바이스도 자격증명을 전혀 갖지 않는다.
-- Anthropic으로 가는 추가 요청은 0건이다. 트래픽은 Mac과 디바이스 사이의 LAN(또는 USB)뿐이다.
-- 페어링 키(32B 무작위)는 Mac Keychain(`ctm-pairing`)과 디바이스 NVS에만 있다. WiFi 비밀번호는 디바이스 NVS에만 있다. 둘 다 로그나 화면에 출력하지 않는다.
-- 디바이스로 보내는 값은 사용률, 리셋 시각, 관측 시각뿐이다.
+## Requirements
+
+- **macOS.** The bridge uses launchd, Keychain and mDNS. Linux would need a port of `ctm install` and the keystore.
+- **Claude Code with a Pro or Max subscription**, recent enough to include `rate_limits` in the status-line JSON. It was observed present in 2.1.289 and absent in 2.1.283/2.1.284.
+- **LilyGO T-Display, classic ESP32**, not the S3. The partition table assumes the **16 MB flash** variant (`firmware/partitions_16mb.csv`). For a 4 MB board, drop the two `board_upload.flash_size` / `board_build.partitions` lines in `platformio.ini`; the app is about 1 MB.
+- [PlatformIO](https://platformio.org/). Its bundled Python (`~/.platformio/penv/bin/python3`) already has `pyserial`, which the bridge needs.
+- `/usr/bin/python3` (Xcode Command Line Tools) for the status-line script.
+- A 2.4 GHz WiFi network that the Mac and the board share. WiFi is optional; USB-only works too.
+
+## Quick start
+
+All host commands run from `host/`. To save typing:
+
+```sh
+cd host
+alias ctm='~/.platformio/penv/bin/python3 -m ctm.cli'
+```
+
+**1. Select your board.** Plug the T-Display in by USB, then run:
+
+```sh
+ctm select-board
+```
+
+This lists USB-serial ports with their serial numbers and chips and saves your choice to `~/.claude-token-meter/config.json`. The bridge only ever opens **that** board, matched by USB serial number. Other ESP32 boards on your desk are never touched.
+
+**2. Flash the firmware.**
+
+```sh
+cd .. && ~/.platformio/penv/bin/pio run -d firmware -e t-display -t upload \
+  --upload-port "$(cd host && ~/.platformio/penv/bin/python3 -m ctm.cli port)"
+cd host
+```
+
+**3. Install the bridge and the status line.**
+
+```sh
+ctm install --statusline --dry-run   # shows exactly what will change
+ctm install --statusline
+```
+
+- This writes `~/Library/LaunchAgents/com.ctm.bridge.plist`. The bridge starts at login and is restarted if it exits.
+- It sets `statusLine` in `~/.claude/settings.json` and saves a timestamped backup first.
+- **If you already have a status line**, install stops and shows it. `--force` replaces it. Your terminal status bar then shows `5h 47% · 7d 21%`.
+
+**4. Pair over WiFi (optional).** Run this in a **regular terminal** (Terminal or iTerm). It asks for a password, so it won't work through Claude Code's `!` prefix.
+
+```sh
+ctm setup
+```
+
+- The board scans for networks. You pick one and type the password.
+- A random 32-byte pairing key is created and stored in your **macOS Keychain** and on the board.
+- After this you can unplug the USB cable and power the board from any USB charger. Updates continue over WiFi. If you plug it back into the Mac, the bridge switches to USB automatically.
+
+**5. Check everything.**
+
+```sh
+ctm doctor
+```
+
+Send a message in any Claude Code session and the meter updates within seconds.
+
+**Uninstall:** `ctm uninstall --statusline` removes the LaunchAgent and our status line. `ctm unpair` erases WiFi settings and the key from the board and from the Keychain.
+
+## Privacy & security
+
+- **No Claude credentials are read.** Claude Code's OAuth token and the Keychain item `Claude Code-credentials` are never read or used. The device holds no Anthropic credentials.
+- **No extra traffic to Anthropic.** The only network traffic is Mac ↔ device on your LAN.
+- **What the device receives:** usage percentages, reset times and observation times. Nothing else from your sessions — no prompts, paths or session IDs.
+- **WiFi pushes are signed.** Each push carries HMAC-SHA256 with the pairing key and a monotonic sequence number. The device rejects:
+  - unsigned or forged requests (`401`)
+  - replays (`409`)
+  - bodies over 1 KB (`413`)
+- **Where secrets live.** The WiFi password is stored only on the device (NVS). The pairing key lives in the device's NVS and in your Keychain (`ctm-pairing`). Neither is ever printed or logged.
+- `GET /v1/info` on the device is unauthenticated and contains no secrets.
+
+## Troubleshooting
+
+- **Start with `ctm doctor`.** It checks, PASS/FAIL each:
+  - status-line registration
+  - session files
+  - the selected board
+  - the bridge process and LaunchAgent
+  - the transport
+  - device reachability
+  - the pairing key
+  - the last acknowledgement
+- **The meter shows `--`.** Claude Code only includes `rate_limits` after the first response in a session, and only on subscription plans. Send a message.
+- **Local Network permission.** If the bridge log shows `EHOSTUNREACH`, allow the Python that runs the bridge under System Settings → Privacy & Security → Local Network.
+- **Use `curl -4` to talk to the device.** Plain `curl http://ctmeter-xxxx.local/...` may try IPv6 first and time out. The bridge uses IPv4 only.
+- **Re-flashing while the bridge holds the port.** The bridge keeps the board's serial port open exclusively (TIOCEXCL) so other tools can't grab it by accident. Release it with `kill -USR1 "$(cat ~/.claude-token-meter/serial/hold.pid)"`, flash, then run the same command again to re-acquire.
+- **Logs:**
+  - `~/.claude-token-meter/serial/YYYYMMDD.log`: device output plus bridge events, kept 14 days.
+  - `~/.claude-token-meter/launchd/`: launchd stdout/stderr.
+
+## Known limitations
+
+- **Only the two windows above are shown.** Claude Code's status-line JSON exposes `five_hour` and `seven_day`, not per-model weekly limits.
+- **Numbers refresh only on Claude Code activity**, as described above.
+- **No over-the-air firmware updates yet.** Re-flash over USB.
+- **Device screen text is English only.** The built-in TFT fonts have no Hangul.
+
+## Development
+
+- `docs/ARCHITECTURE.md`: design and rationale
+- `docs/PROTOCOL.md`: the host ↔ device contract
+- `docs/HARDWARE.md`: board facts and gotchas, read before touching firmware
+- `docs/P0_FINDINGS.md`: what was measured on real hardware
+- `docs/TASKS.md`: open items
+- **Tests:** `bash tools/check_fixtures.sh` runs the host unit tests and the firmware's native tests (`pio test -e native`). It fails closed unless both sides agree on every shared fixture in `fixtures/`.
+- **Screen preview without a device:** `~/.platformio/penv/bin/python3 tools/preview.py <frame.json> -o out.png`
+- **Working with Claude Code:** [`CLAUDE.md`](CLAUDE.md) has the working rules this project was built with.
+
+## License
+
+[MIT](LICENSE)

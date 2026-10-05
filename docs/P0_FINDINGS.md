@@ -36,10 +36,9 @@ ARCHITECTURE.md의 P0 항목을 실측했다. 이 결과에 따라 ARCHITECTURE.
 ## 디바이스 식별 `[V]`
 | 항목 | 값 |
 |---|---|
-| 포트 | `/dev/cu.usbserial-59150189961` |
+| 포트 | `/dev/cu.usbserial-<serial>` (CH9102는 USB 시리얼 번호 뒤에 숫자가 붙은 이름으로 뜬다) |
 | USB 칩 | CH9102, VID `0x1A86`, PID `0x55D4` |
-| USB 시리얼 번호 | **`5915018996`** |
-| USB 위치 | locationID `51380224` |
+| USB 시리얼 번호 | 보드마다 다르다(예: 10자리 숫자). `ctm select-board`로 골라 `~/.claude-token-meter/config.json`에 저장한다. |
 
 - 현재 펌웨어는 형제 프로젝트(bus-eta)의 것이다. 부팅할 때 `[diag]` 로그가 나온다.
 - 포트 점유는 `tools/serial_hold.py`가 한다.
@@ -77,7 +76,7 @@ ARCHITECTURE.md의 P0 항목을 실측했다. 이 결과에 따라 ARCHITECTURE.
 - 브리지를 연속으로 3번 재시작했고, 매번 ack까지 확인했다.
 
 ## P4 실기 검증 (2026-10-05) `[V]`
-- `ctm setup`은 일반 터미널에서 실행해 성공했다. 디바이스 이름은 `ctmeter-8f70`, IP는 192.168.219.106, RSSI는 −27~−41dBm였다.
+- `ctm setup`은 일반 터미널에서 실행해 성공했다. 디바이스 이름은 `ctmeter-xxxx`, IP는 192.168.x.y, RSSI는 −27~−41dBm였다.
   - provision 명령 줄은 브리지 로그에 0줄이었다. 브리지를 일시정지한 상태에서 보냈기 때문이다.
   - Claude Code의 `!`에서는 TTY가 없어 setup이 동작하지 않는다. 지금은 setup이 이를 감지해 exit 2로 거부한다.
 - mDNS: Python `getaddrinfo(AF_INET)`는 7ms에 해석된다. `curl`(IPv4 지정 없이)은 IPv6를 먼저 시도하다 시간 초과가 난다. `curl -4`는 정상이다. 브리지는 AF_INET만 쓰므로 영향이 없다.

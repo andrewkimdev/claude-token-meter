@@ -25,7 +25,9 @@ LilyGO T-Display(클래식 ESP32)에 현재 Mac에 로그인된 Claude 구독 �
 
 ## 툴체인 요약
 - pio: `~/.platformio/penv/bin/pio` (PATH에 없음)
-- 포트: `/dev/cu.usbserial-59150189961`
+- 포트: CH9102 보드는 `/dev/cu.usbserial-<serial>`로 뜬다. 대상 보드는 `ctm select-board`로 골라 `~/.claude-token-meter/config.json`에 저장한다.
+  - 우선순위: CLI 플래그 > 환경변수 `CTM_USB_SERIAL` > config.json. 현재 장치 경로는 `cd host && python -m ctm.cli port`로 확인한다.
+  - `platformio.ini`에는 `upload_port`를 하드코딩하지 않는다. 업로드: `~/.platformio/penv/bin/pio run -d firmware -e t-display -t upload --upload-port "$(cd host && python -m ctm.cli port)"`
 - 업로드 속도: 460800
 
 ## 현재 상태
@@ -33,13 +35,13 @@ LilyGO T-Display(클래식 ESP32)에 현재 Mac에 로그인된 Claude 구독 �
 - 브리지 실행: `cd host && ~/.platformio/penv/bin/python3 -m ctm.bridge`. 브리지가 포트를 TIOCEXCL로 소유한다.
   - 업로드할 때: `kill -USR1 $(cat ~/.claude-token-meter/serial/hold.pid)`로 해제 → 업로드 → 같은 명령으로 재획득.
   - 브리지가 꺼져 있을 때는 `tools/serial_hold.py`로 포트를 붙잡는다.
-- 대상 보드: USB 시리얼 `5915018996`. **이 번호를 확인한 포트에만 업로드한다.**
+- 대상 보드: `ctm select-board`로 선택한 USB 시리얼 번호의 보드. **`ctm port`로 확인한 포트에만 업로드한다.**
 - 호스트 테스트: `cd host && /usr/bin/python3 -m unittest discover -s tests -t .`
 - 펌웨어 빌드: `~/.platformio/penv/bin/pio run -d firmware -e t-display`
 - **P2 완료 `[V]`**: `bash tools/check_fixtures.sh`는 호스트 unittest와 `pio test -e native`를 함께 돌리고, 둘 중 하나라도 실패하면 결론을 내지 않는다(fail-closed). 프레임 fixture 16개에서 양쪽 판정이 일치한다.
 - **P3 완료 (빌드 `[V]`, 버튼과 디밍은 실기 미검증 `[?]`)**: 상세 뷰(BTN1), 백라이트 3단(BTN2), 60분 무변화 시 자동 디밍, host offline 표시를 넣었다.
   - `tools/preview.py`로 화면을 PNG로 미리 볼 수 있다. `render.cpp`를 바꾸면 `preview.py`도 함께 바꾼다.
-- **P4 완료 `[V]`**: 디바이스는 `ctmeter-8f70`이다. 브리지를 `--transport auto`로 띄우면 USB가 있으면 USB로, 없으면 WiFi(서명된 HTTP)로 보낸다.
+- **P4 완료 `[V]`**: 디바이스 이름은 `ctmeter-xxxx`(STA MAC 하위 2바이트)다. 브리지를 `--transport auto`로 띄우면 USB가 있으면 USB로, 없으면 WiFi(서명된 HTTP)로 보낸다.
   - `ctm setup`은 반드시 일반 터미널에서 실행한다(`!` 불가).
 - **P5/P6 완료 `[V]`**:
   - 펌웨어 0.3.0: 전원을 다시 켜면 마지막 값을 "restored"로 복원한다. WiFi 재접속 백오프, WDT가 들어갔다.

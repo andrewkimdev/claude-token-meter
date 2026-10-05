@@ -268,14 +268,14 @@ class DeviceStore(unittest.TestCase):
     def test_roundtrip_no_key(self):
         with tempfile.TemporaryDirectory() as home:
             self.assertIsNone(device.load(home))
-            device.save(home, "ctmeter-a1b2", "192.168.1.5", 1791180000)
+            device.save(home, "ctmeter-a1b2", "192.0.2.5", 1791180000)
             rec = device.load(home)
-            self.assertEqual(rec, {"host": "ctmeter-a1b2", "ip": "192.168.1.5",
+            self.assertEqual(rec, {"host": "ctmeter-a1b2", "ip": "192.0.2.5",
                                    "paired_at": 1791180000})
             self.assertEqual(os.stat(device.path(home)).st_mode & 0o777, 0o600)
-            self.assertTrue(device.update_ip(home, "192.168.1.6"))
-            self.assertFalse(device.update_ip(home, "192.168.1.6"))
-            self.assertEqual(device.load(home)["ip"], "192.168.1.6")
+            self.assertTrue(device.update_ip(home, "192.0.2.6"))
+            self.assertFalse(device.update_ip(home, "192.0.2.6"))
+            self.assertEqual(device.load(home)["ip"], "192.0.2.6")
             self.assertTrue(device.remove(home))
             self.assertFalse(device.remove(home))
             with open(device.path(home), "w") as f:

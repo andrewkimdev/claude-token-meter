@@ -8,10 +8,11 @@ import unittest
 from argparse import Namespace
 
 from tests._util import wr
-from ctm import cli, device, keystore, pairing
+from ctm import board, cli, device, keystore, pairing
 
 PASSWORD = "s3cret-Pa55word!"
 KEY = bytes(range(100, 132))
+FAKE_SERIAL = "0123456789"
 
 
 class Clock(object):
@@ -37,7 +38,7 @@ class FakeDevice(object):
         self.cmds = []
         self.closed = False
         self.provision = provision or {"t": "provision", "ok": True,
-                                       "host": "ctmeter-a1b2", "ip": "192.168.1.77"}
+                                       "host": "ctmeter-a1b2", "ip": "192.0.2.77"}
         self.scan = scan
         self.unpair = unpair
         if hello:
@@ -103,6 +104,7 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.home = self.tmp.name
+        board.save_config(self.home, usb_serial=FAKE_SERIAL)
         self.clock = Clock()
         self.events = []
         self.out = io.StringIO()
@@ -167,7 +169,7 @@ class Setup(Base):
         self.assertTrue(d.written.startswith(b"\n{"))
         self.assertEqual(len(self.getpass_calls), 1)
         rec = device.load(self.home)
-        self.assertEqual((rec["host"], rec["ip"]), ("ctmeter-a1b2", "192.168.1.77"))
+        self.assertEqual((rec["host"], rec["ip"]), ("ctmeter-a1b2", "192.0.2.77"))
         self.assertNotIn("key", rec)
         self.assertEqual(self.ks.get("ctmeter-a1b2"), KEY.hex())
         out = self.out.getvalue()
@@ -175,7 +177,7 @@ class Setup(Base):
         self.assertIn("\U0001F512", out)
         self.assertIn("▂▄▆█", out)    # -48 dBm: 4 bars
         self.assertIn("Invalid choice", out)
-        self.assertIn("Paired: ctmeter-a1b2.local  ip 192.168.1.77", out)
+        self.assertIn("Paired: ctmeter-a1b2.local  ip 192.0.2.77", out)
         self.assertIn("fw 0.2.0", out)
         self.assert_no_secret_leak()
         self.assert_paused_then_resumed_after_close()
@@ -426,25 +428,27 @@ class Status(unittest.TestCase):
             out = io.StringIO()
             cli.cmd_status(home, out, keystore=ks, find_port=lambda: None)
             self.assertIn("transport: none", out.getvalue())
-            self.assertIn("usb device: not present", out.getvalue())
+            self.assertIn("board: none (no board selected", out.getvalue())
             self.assertIn("paired: no", out.getvalue())
+            board.save_config(home, usb_serial=FAKE_SERIAL)
             os.makedirs(os.path.join(home, "serial"))
             wr(os.path.join(home, "serial", "hold.state"),
-               "2026-10-05 10:00:00 WIFI ctmeter-a1b2 192.168.1.5 ok seq=1791180000\n")
-            device.save(home, "ctmeter-a1b2", "192.168.1.5")
+               "2026-10-05 10:00:00 WIFI ctmeter-a1b2 192.0.2.5 ok seq=1791180000\n")
+            device.save(home, "ctmeter-a1b2", "192.0.2.5")
             ks.set("ctmeter-a1b2", KEY.hex())
             out = io.StringIO()
             cli.cmd_status(home, out, keystore=ks, find_port=lambda: None)
             text = out.getvalue()
             self.assertIn("transport: wifi", text)
-            self.assertIn("paired: ctmeter-a1b2.local  ip 192.168.1.5", text)
+            self.assertIn("board: usb_serial 0123456789 (config): not present", text)
+            self.assertIn("paired: ctmeter-a1b2.local  ip 192.0.2.5", text)
             self.assertIn("key in Keychain: yes", text)
             self.assertNotIn(KEY.hex(), text)
             wr(os.path.join(home, "serial", "hold.state"), "2026-10-05 10:00:00 HELD /dev/cu.x\n")
             out = io.StringIO()
             cli.cmd_status(home, out, keystore=ks, find_port=lambda: "/dev/cu.x")
             self.assertIn("transport: usb", out.getvalue())
-            self.assertIn("usb device: /dev/cu.x", out.getvalue())
+            self.assertIn("board: usb_serial 0123456789 (config): /dev/cu.x", out.getvalue())
 
 
 if __name__ == "__main__":

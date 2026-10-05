@@ -17,6 +17,7 @@ import sys
 import time
 
 try:
+    from ctm import board as _board
     from ctm import bridge as _bridge
     from ctm import device as _device
     from ctm import install as _install
@@ -24,6 +25,7 @@ try:
     from ctm import wifi as _wifi
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from ctm import board as _board
     from ctm import bridge as _bridge
     from ctm import device as _device
     from ctm import install as _install
@@ -158,16 +160,35 @@ def check_transport(env):
 
 def _usb_presence(env):
     """(present bool or None if unknown, detail)."""
+    sn, _src = _board.resolve_serial(None, env.home)
+    fp = env.find_port
+    if fp is None:
+        if not sn:
+            return False, "no board selected"
+        fp = lambda: _bridge.find_port(sn)  # noqa: E731
     try:
-        fp = env.find_port
-        if fp is None:
-            fp = _bridge.find_port
         dev = fp()
     except ImportError:
         return None, "pyserial not installed for this python"
+    except _board.BoardError as e:
+        return None, str(e)
     except Exception as e:
         return None, "port scan failed: %s" % e
     return bool(dev), (dev or "not plugged in")
+
+
+def check_board(env):
+    sn, src = _board.resolve_serial(None, env.home)
+    if not sn:
+        return FAIL, "%s (USB is off; WiFi only if paired)" % _board.NO_BOARD_HINT
+    usb, d = _usb_presence(env)
+    if usb is None and "refusing to guess" in d:
+        return FAIL, "usb_serial %s (%s): %s" % (sn, src, d)
+    if usb is None:
+        d = "presence unknown (%s)" % d
+    elif not usb:
+        d = "not plugged in (WiFi is used if paired)"
+    return PASS, "usb_serial %s (%s): %s" % (sn, src, d)
 
 
 def check_device(env):
@@ -237,6 +258,7 @@ def check_last_ack(env):
 CHECKS = (
     ("statusline", check_statusline),
     ("sessions", check_sessions),
+    ("board", check_board),
     ("bridge", check_bridge),
     ("launchagent", check_launchagent),
     ("transport", check_transport),

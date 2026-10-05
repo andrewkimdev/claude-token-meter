@@ -1,5 +1,5 @@
 """Paired-device record (PROTOCOL v1 §4.2): <CTM_HOME>/device.json
-{"host": "ctmeter-xxxx", "ip": "192.168.1.23", "paired_at": <epoch int>}
+{"host": "ctmeter-xxxx", "ip": "192.0.2.23", "paired_at": <epoch int>}
 
 The pairing key is NOT stored here (it lives in the Keychain, ctm.keystore).
 """

@@ -1,6 +1,8 @@
 """ctm CLI.
 
   python -m ctm.cli status
+  python -m ctm.cli select-board [--all] [--serial N]   # pick the USB board -> config.json
+  python -m ctm.cli port [--port-serial N]   # print the board's /dev path (exit 1 if absent)
   python -m ctm.cli setup [--dry-run] [--port-serial N]   # interactive WiFi pairing (USB)
   python -m ctm.cli unpair [--local] [--dry-run] [--port-serial N]
   python -m ctm.cli info [--wifi] [--port-serial N]
@@ -14,6 +16,12 @@ push-test writes <CTM_HOME>/sessions/test-<ts>.json with resets_at in the
 future so a running bridge picks it up. Because of the merge rules (latest
 resets_at wins) a test file usually *overrides* real sessions until it is
 removed: always run `push-test --clear` afterwards.
+
+The target board is identified by USB serial number: --port-serial >
+env CTM_USB_SERIAL > <CTM_HOME>/config.json (written by select-board) > none.
+There is no default; with none, nothing USB is ever opened.
+Firmware upload to exactly that board:
+  pio run -d firmware -e t-display -t upload --upload-port "$(cd host && python3 -m ctm.cli port)"
 """
 import argparse
 import json
@@ -22,10 +30,12 @@ import sys
 import time
 
 try:
+    from ctm import board as _board
     from ctm import merge as _merge
     from ctm import device as _device
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from ctm import board as _board
     from ctm import merge as _merge
     from ctm import device as _device
 
@@ -46,15 +56,21 @@ def _rel(sec):
 
 def _usb_present(find_port):
     try:
-        if find_port is None:
-            from ctm import bridge as _bridge
-            find_port = _bridge.find_port
         dev = find_port()
     except ImportError:
         return "unknown (pyserial not installed for this python)"
     except Exception as e:
         return "unknown (%s)" % e
     return dev or "not present"
+
+
+def board_line(home, find_port=None, serial=None):
+    """'usb_serial N (source): /dev/... | not present' or the no-board hint."""
+    sn, src = _board.resolve_serial(serial, home)
+    if not sn:
+        return "none (%s)" % _board.NO_BOARD_HINT
+    fp = find_port or (lambda: _board.find_port(sn))
+    return "usb_serial %s (%s): %s" % (sn, src, _usb_present(fp))
 
 
 def _transport_from_state(state):
@@ -89,7 +105,7 @@ def cmd_status(home, out=sys.stdout, keystore=None, find_port=None):
     except OSError:
         out.write("hold.state: (none)\n")
     out.write("transport: %s\n" % _transport_from_state(state.strip()))
-    out.write("usb device: %s\n" % _usb_present(find_port))
+    out.write("board: %s\n" % board_line(home, find_port))
     rec = _device.load(home)
     if not rec:
         out.write("paired: no (run ctm setup)\n")
@@ -155,22 +171,70 @@ def _pct(s):
     return int(v) if v == int(v) else v
 
 
-def run_pairing_cmd(args, home, env=None):
+def _isatty():
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _tty_refusal(what, why, err=None):
+    (err or sys.stderr).write(
+        "ctm %s needs an interactive terminal (%s).\n"
+        "Run it in Terminal/iTerm, not via Claude Code's `!` prefix:\n"
+        "  cd host && ~/.platformio/penv/bin/python3 -m ctm.cli %s\n" % (what, why, what))
+    return 2
+
+
+def cmd_select_board(home, serial=None, show_all=False, isatty=_isatty, input_fn=input,
+                     out=sys.stdout, err=None, comports=None, environ=None):
+    if serial is None and not isatty():
+        _tty_refusal("select-board", "it asks you to confirm the board", err)
+        (err or sys.stderr).write("Non-interactive alternative: ctm select-board --serial N\n")
+        return 2
+    rc, _sn = _board.select_board(home, serial=serial, show_all=show_all, input_fn=input_fn,
+                                  out=out, comports=comports, environ=environ)
+    return rc
+
+
+def cmd_port(home, serial=None, out=sys.stdout, err=None, comports=None, environ=None):
+    """Print the configured board's current /dev path. 0 present, 1 absent, 2 none/error."""
+    err = err or sys.stderr
+    sn, _src = _board.resolve_serial(serial, home, environ)
+    if not sn:
+        err.write("ctm port: %s\n" % _board.NO_BOARD_HINT)
+        return 2
+    try:
+        dev = _board.find_port(sn, comports)
+    except ImportError:
+        err.write("ctm port: pyserial is not installed for this python\n")
+        return 2
+    except _board.BoardError as e:
+        err.write("ctm port: %s\n" % e)
+        return 2
+    if not dev:
+        err.write("ctm port: board with USB serial %s is not plugged in\n" % sn)
+        return 1
+    out.write(dev + "\n")
+    return 0
+
+
+def run_pairing_cmd(args, home, env=None, isatty=_isatty, select=None):
     from ctm import pairing as _pairing
     real_console = env is None   # tests inject env with a fake console
-    env = env or _pairing.Env(home=home, serial_no=getattr(args, "port_serial", None))
+    flag = getattr(args, "port_serial", None)
+    if args.cmd == "setup" and not args.dry_run:
+        # setup asks for an SSID choice and a password, so it needs a real
+        # terminal. Claude Code's `!` prefix has no TTY: fail loudly before
+        # touching the bridge instead of silently getting EOF [V].
+        if real_console and not isatty():
+            return _tty_refusal("setup", "it asks for the WiFi password")
+        if not _board.resolve_serial(flag, home)[0]:
+            # no board yet: choose it first (never guess a port)
+            print("No board selected yet. Choose the meter board first.")
+            rc = (select or (lambda: cmd_select_board(home, isatty=isatty)))()
+            if rc != 0:
+                return rc
+    env = env or _pairing.Env(home=home, serial_no=flag)
     try:
         if args.cmd == "setup":
-            # setup asks for an SSID choice and a password, so it needs a real
-            # terminal. Claude Code's `!` prefix has no TTY: fail loudly before
-            # touching the bridge instead of silently getting EOF [V].
-            if real_console and not args.dry_run and not (sys.stdin.isatty() and sys.stdout.isatty()):
-                sys.stderr.write(
-                    "ctm setup needs an interactive terminal (it asks for the WiFi password).\n"
-                    "Run it in Terminal/iTerm, not via Claude Code's `!` prefix:\n"
-                    "  cd %s && ~/.platformio/penv/bin/python3 -m ctm.cli setup\n"
-                    % os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-                return 2
             return _pairing.run_setup(env, dry_run=args.dry_run, ssid=args.ssid)
         if args.cmd == "unpair":
             return _pairing.run_unpair(env, local_only=args.local, dry_run=args.dry_run)
@@ -215,7 +279,14 @@ def main(argv=None):
     inf.add_argument("--wifi", action="store_true", help="use WiFi even if USB is present")
     for p in (st, up, inf):
         p.add_argument("--port-serial", metavar="N",
-                       help="USB serial number of the target (default CTM_USB_SERIAL / 5915018996)")
+                       help="USB serial number of the target (default: CTM_USB_SERIAL, "
+                       "then config.json from ctm select-board)")
+    sb = sub.add_parser("select-board", help="choose the USB board (saved to config.json)")
+    sb.add_argument("--all", action="store_true",
+                    help="list every serial port, not only known ESP32 USB bridges")
+    sb.add_argument("--serial", metavar="N", help="non-interactive: save this USB serial number")
+    po = sub.add_parser("port", help="print the selected board's /dev path (exit 1 if absent)")
+    po.add_argument("--port-serial", metavar="N", help="override the configured USB serial")
     pt = sub.add_parser("push-test", help="write a fake session file (delete with --clear)")
     pt.add_argument("--pct5", type=_pct)
     pt.add_argument("--pct7", type=_pct)
@@ -244,6 +315,10 @@ def main(argv=None):
         return run_install_cmd(args)
     if args.cmd == "status":
         return cmd_status(home)
+    if args.cmd == "select-board":
+        return cmd_select_board(home, serial=args.serial, show_all=args.all)
+    if args.cmd == "port":
+        return cmd_port(home, serial=args.port_serial)
     if args.cmd in ("setup", "unpair", "info"):
         from ctm import pairing as _pairing
         _pairing.install_exit_signals()   # SIGTERM/SIGHUP -> finally -> bridge resumed

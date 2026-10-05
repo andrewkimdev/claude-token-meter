@@ -40,7 +40,9 @@ BUTTON1  35 (input-only, 외부 풀업 있음)   BUTTON2 0
 
 - 호스트: MacBook Pro M4, macOS. PlatformIO는 VS Code 확장.
 - CLI: `~/.platformio/penv/bin/pio` (PATH에 없음)
-- 시리얼 포트: **`/dev/cu.usbserial-59150189961`** — `cu.wchusbserial*`이 아니다.
+- 시리얼 포트: **`/dev/cu.usbserial-<serial>`** (`<serial>`은 보드별 USB 시리얼 번호 기반) — `cu.wchusbserial*`이 아니다.
+  대상 보드는 `ctm select-board`로 골라 `~/.claude-token-meter/config.json`에 저장한다
+  (우선순위: CLI 플래그 > 환경변수 `CTM_USB_SERIAL` > config.json). `ctm port`가 현재 장치 경로를 출력한다.
   macOS 내장 CDC 드라이버를 쓰고 있다. 항상 `cu.*`, 절대 `tty.*` 아님.
 - **업로드 속도 460800.** 921600은 macOS 내장 드라이버에서 실패한다
   (`Invalid head of packet`). 칩이 아니라 드라이버 한계다.
@@ -132,7 +134,7 @@ pio run -e t-display -t upload
 **3.11 zsh는 매칭 실패한 글롭에서 명령 전체를 거부한다.**
 `/dev/cu.wchusbserial*` 같은 경로가 매칭 안 되면 bash처럼 리터럴로 넘기는 대신
 `zsh: no matches found`로 죽는다. `PORT=$(ls /dev/cu.usbserial-* | head -1)`처럼
-서브셸로 감싸거나 포트를 하드코딩한다.
+서브셸로 감싸거나 `ctm port`(선택한 보드의 경로)를 쓴다.
 
 **3.12 zsh는 따옴표 없는 파라미터 확장을 단어 분리하지 않는다.**
 `CMD="prog --flag"; $CMD arg` 는 bash에서 되고 **zsh에서 실패한다** — 확장 전체를
@@ -198,8 +200,8 @@ framework = arduino
 monitor_speed   = 115200
 monitor_filters = esp32_exception_decoder
 
-upload_port  = /dev/cu.usbserial-59150189961
-monitor_port = /dev/cu.usbserial-59150189961
+; upload_port는 하드코딩하지 않는다. 업로드 시 지정:
+;   pio run -d firmware -e t-display -t upload --upload-port "$(cd host && python -m ctm.cli port)"
 upload_speed = 460800          ; 921600은 macOS 내장 드라이버에서 실패
 
 ; 엔트리포인트 app/main.cpp 하나뿐 — 필터 단순 (gotcha 3.14)

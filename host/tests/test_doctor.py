@@ -9,7 +9,7 @@ import unittest
 
 from tests._util import wr
 from tests.test_install import FakeOps
-from ctm import device, doctor, install, keystore
+from ctm import board, device, doctor, install, keystore
 
 KEY_HEX = "ab" * 32
 
@@ -19,7 +19,7 @@ class FakeInfoClient(object):
         self.info, self.err = info, err
 
     def get_info(self):
-        return self.info, "192.168.1.50", self.err
+        return self.info, "192.0.2.50", self.err
 
 
 class Doctor(unittest.TestCase):
@@ -61,15 +61,16 @@ class Doctor(unittest.TestCase):
         serial = os.path.join(self.home, "serial")
         os.makedirs(serial)
         wr(os.path.join(serial, "hold.pid"), str(os.getppid()))   # a live pid
-        wr(os.path.join(serial, "hold.state"), "2026-10-05 10:00:00 WIFI ctmeter-a1b2 192.168.1.50 ok seq=5\n")
+        wr(os.path.join(serial, "hold.state"), "2026-10-05 10:00:00 WIFI ctmeter-a1b2 192.0.2.50 ok seq=5\n")
         wr(os.path.join(serial, time.strftime("%Y%m%d") + ".log"),
-           "%s >> wifi {...}  (heartbeat)\n%s << wifi ack seq=5 ip=192.168.1.50\n"
+           "%s >> wifi {...}  (heartbeat)\n%s << wifi ack seq=5 ip=192.0.2.50\n"
            % ((time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - 30)),) * 2))
         os.makedirs(self.paths.launch_agents)
         wr(self.paths.plist, "<plist/>")
         self.ops = FakeOps(loaded=True, job_pid=os.getppid())
-        device.save(self.home, "ctmeter-a1b2", "192.168.1.50", 1791100000)
+        device.save(self.home, "ctmeter-a1b2", "192.0.2.50", 1791100000)
         self.ks.set("ctmeter-a1b2", KEY_HEX)
+        board.save_config(self.home, usb_serial="0123456789")
 
     def run_doctor(self, ops=None):
         out = io.StringIO()
@@ -143,6 +144,33 @@ class Doctor(unittest.TestCase):
         self.usb = None
         rc, o = self.run_doctor()
         self.assertTrue(self.line(o, "device").startswith("FAIL"))
+
+    def test_board_configured_absent_and_present(self):
+        rc, o = self.run_doctor()
+        self.assertEqual(rc, 0, o)
+        self.assertIn("usb_serial 0123456789 (config): not plugged in", self.line(o, "board"))
+        self.usb = "/dev/cu.usbserial-01234567891"
+        rc, o = self.run_doctor()
+        l = self.line(o, "board")
+        self.assertTrue(l.startswith("PASS"), l)
+        self.assertIn("/dev/cu.usbserial-01234567891", l)
+
+    def test_no_board_selected_fails(self):
+        os.unlink(board.config_path(self.home))
+        rc, o = self.run_doctor()
+        self.assertEqual(rc, 1)
+        l = self.line(o, "board")
+        self.assertTrue(l.startswith("FAIL"), l)
+        self.assertIn("ctm select-board", l)
+
+    def test_ambiguous_board_fails(self):
+        def amb():
+            raise board.BoardError("2 ports match USB serial 0123456789 (a, b); refusing to guess")
+        e = self.env()
+        e.find_port = amb
+        out = io.StringIO()
+        self.assertEqual(doctor.run(e, out), 1)
+        self.assertTrue(self.line(out.getvalue(), "board").startswith("FAIL"))
 
     def test_crashing_check_means_no_verdict(self):
         def boom(env):

@@ -181,7 +181,7 @@ tools/     preview.py  genstrings.py(필요 시)
 
 ## CLAUDE.md에 적어 둘 사항 (Claude Code용)
 
-1. 코드를 쓰기 전에 `docs/HARDWARE.md` §6.3 gotcha부터 읽는다. pio 경로는 `~/.platformio/penv/bin/pio`, 포트는 `/dev/cu.usbserial-59150189961`, 업로드 속도는 460800이다.
+1. 코드를 쓰기 전에 `docs/HARDWARE.md` §6.3 gotcha부터 읽는다. pio 경로는 `~/.platformio/penv/bin/pio`, 포트는 `ctm select-board`로 고른 보드(`cd host && python -m ctm.cli port`로 확인), 업로드 속도는 460800이다.
 2. **OAuth 토큰과 Keychain의 `Claude Code-credentials`는 절대 읽거나 출력하거나 사용하지 않는다.** `/api/oauth/*` 같은 비공개 엔드포인트도 호출하지 않는다. 사용자 결정 사항이다.
 3. statusline 스크립트에 네트워크 I/O나 느린 작업을 넣지 않는다. 목표는 20ms 이하다. `rate_limits`가 없으면 기존 값을 덮어쓰지 않는다.
 4. 테스트와 개발 중에는 Anthropic에 실제 요청을 보내지 않는다. fixtures와 `ctm push-test`(모의 데이터)를 쓴다.
